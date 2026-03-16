@@ -178,7 +178,6 @@ def smart_pairwise_align(sliceA, sliceB, config: AlignmentConfig = None, **kwarg
         config = AlignmentConfig()
     
     # Import the powerful MST-based structural detection we just built
-    from .spatial_portion_detection import find_spatial_portions
     k_A, labels_A = find_spatial_portions(sliceA, config)
     k_B, labels_B = find_spatial_portions(sliceB, config)
     
