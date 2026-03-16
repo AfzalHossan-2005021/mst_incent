@@ -247,77 +247,101 @@ def find_spatial_portions_mst(
     ratio_threshold: float = 3.0,
     merge_fragments: bool = True,
     knn_build: int = 15,
+    cell_type_key: Optional[str] = 'cell_type_annot',
+    lambda_weight: float = 1.0,
 ) -> PortionDetectionResult:
     """
-    Detect physically distinct tissue portions using MST-based gap detection.
+    Detect physically distinct tissue portions using MST-based gap detection,
+    optionally incorporating cell type composition.
 
     Parameters
     ----------
     adata             : AnnData with .obsm['spatial'] (n x 2 coordinates).
     min_mass_fraction : Minimum fraction of total cells per valid portion.
                         Smaller fragments are merged into the nearest portion.
-                        Default 0.05 (5%).
-    max_portions      : Biological upper bound on k. Default 6.
+    max_portions      : Biological upper bound on k.
     ratio_threshold   : Minimum edge-weight ratio to declare a gap.
-                        tau=3.0: gap must be >= 3x the next intra-tissue edge.
-                        Increase for near-touching tissue; decrease for sparse.
-    merge_fragments   : If True, merge sub-threshold fragments (recommended).
+    merge_fragments   : If True, merge sub-threshold fragments.
     knn_build         : k for BallTree approximation when n > 5000 cells.
+    cell_type_key     : Key in adata.obs containing cell type labels.
+                        If None, only spatial distances are used.
+    lambda_weight     : Weight factor for cell type dissimilarity.
+                        effective_length = spatial_length * (1 + λ * diss),
+                        where diss = 0 if same cell type, 1 otherwise.
+                        λ=0 gives pure spatial detection.
 
     Returns
     -------
-    PortionDetectionResult with attributes:
-        .k               -- number of detected tissue portions (int)
-        .labels          -- per-cell component index array (shape n,)
-        .gap_threshold   -- gap edge threshold in coordinate units
-        .top_ratios      -- ratio array for the top max_portions MST edges
-        .stability_score -- robustness score in [0, 1]; >0.7 = reliable
+    PortionDetectionResult with attributes as before.
     """
     coords = np.asarray(adata.obsm['spatial'], dtype=np.float64)
     n = len(coords)
     if n < 3:
         raise ValueError(f"Slice has only {n} cells.")
 
+    # 1. Build spatial MST
     mst = _build_mst(coords, knn_build=knn_build)
     mst_coo = mst.tocoo()
-    edge_weights = mst_coo.data.copy()
+    spatial_lengths = mst_coo.data.copy()
+    rows = mst_coo.row
+    cols = mst_coo.col
 
-    if len(edge_weights) == 0:
-        return PortionDetectionResult(
-            k=1, labels=np.zeros(n, dtype=int), gap_threshold=0.0,
-            top_edge_weights=np.array([]), top_ratios=np.array([]),
-            stability_score=1.0, ratio_threshold_used=ratio_threshold,
+    # 2. Compute effective edge weights
+    if cell_type_key is not None and cell_type_key in adata.obs:
+        labels = adata.obs[cell_type_key].values
+        # Convert to categorical codes for fast comparison
+        codes, uniques = pd.factorize(labels)
+        dissimilarity = (codes[rows] != codes[cols]).astype(float)
+        effective_lengths = spatial_lengths * (1.0 + lambda_weight * dissimilarity)
+    else:
+        effective_lengths = spatial_lengths.copy()
+
+    # 3. Detect number of portions using effective lengths
+    k = _detect_k_from_mst(effective_lengths, max_portions, ratio_threshold)
+
+    # 4. Obtain component labels by cutting k-1 largest effective-length edges
+    if k <= 1:
+        labels_arr = np.zeros(n, dtype=int)
+    else:
+        # Sort effective lengths descending and find threshold
+        sorted_desc = np.sort(effective_lengths)[::-1]
+        threshold = sorted_desc[k - 1]   # the (k-1)-th largest effective length
+
+        # Keep edges whose effective length <= threshold
+        mask = effective_lengths <= threshold
+        pruned = sp.csr_matrix(
+            (spatial_lengths[mask], (rows[mask], cols[mask])),
+            shape=(n, n),
         )
+        pruned = pruned + pruned.T
+        _, labels_arr = connected_components(pruned, directed=False)
+        labels_arr = labels_arr.astype(int)
 
-    sorted_desc = np.sort(edge_weights)[::-1]
+    # 5. Merge small fragments if requested
+    if merge_fragments:
+        labels_arr = _merge_small_fragments(labels_arr, coords, min_mass_fraction)
+
+    # 6. Recompute k after merging
+    k = len(np.unique(labels_arr))
+
+    # 7. Compute stability score (still using effective lengths)
+    stability = _compute_stability_score(effective_lengths, k, max_portions)
+
+    # 8. Gap threshold in original spatial units (useful for interpretation)
+    if k >= 2:
+        sorted_spatial = np.sort(spatial_lengths)[::-1]
+        gap_threshold = float(sorted_spatial[k - 1])   # spatial length of the cut edge
+    else:
+        gap_threshold = float('inf')
+
+    # 9. Build result object
+    sorted_desc = np.sort(effective_lengths)[::-1]
     n_top = min(max_portions, len(sorted_desc) - 1)
     top_weights = sorted_desc[:n_top + 1]
     top_ratios = top_weights[:-1] / (top_weights[1:] + 1e-12)
 
-    k = _detect_k_from_mst(edge_weights, max_portions, ratio_threshold)
-    labels = _build_components(mst, k, n)
-
-    if merge_fragments:
-        labels = _merge_small_fragments(labels, coords, min_mass_fraction)
-    elif not _validate_portions(labels, min_mass_fraction):
-        raise ValueError(
-            "Detected portions include fragments below min_mass_fraction. "
-            "Set merge_fragments=True or increase ratio_threshold."
-        )
-
-    k = len(np.unique(labels))
-    stability = _compute_stability_score(edge_weights, k, max_portions)
-    gap_threshold = float(sorted_desc[k - 1]) if k >= 2 else float('inf')
-
-    if stability < 0.4:
-        warnings.warn(
-            f"Low stability score ({stability:.2f}) for k={k}. "
-            "Consider adjusting ratio_threshold or inspecting the slide.",
-            UserWarning,
-        )
-
     return PortionDetectionResult(
-        k=k, labels=labels, gap_threshold=gap_threshold,
+        k=k, labels=labels_arr, gap_threshold=gap_threshold,
         top_edge_weights=top_weights, top_ratios=top_ratios,
         stability_score=stability,
         ratio_threshold_used=ratio_threshold,
