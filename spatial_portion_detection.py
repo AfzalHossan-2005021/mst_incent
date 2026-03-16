@@ -107,23 +107,30 @@ def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
 
 def _detect_k_from_mst(
     edge_weights: np.ndarray,
-    max_portions: int = 6,
+    n_cells: int,
+    min_mass_fraction: float,
     ratio_threshold: float = 3.0,
-    max_edges_to_check: int = 1000,
 ) -> int:
     """
     Detect number of tissue portions using the Maximum Ratio Gap criterion.
 
     Sorts MST edges descending. Computes ratio[m] = e_m / e_{m+1}.
-    argmax(ratio) identifies the last gap edge. Evaluates deep enough 
-    into the MST to bypass edges linking to single-cell spatial debris.
+    argmax(ratio) identifies the last gap edge. 
+    
+    The search depth is biologically grounded by `min_mass_fraction`:
+    If a true anatomical portion must hold at least X% of cells, then up to 
+    X% of cells could theoretically exist as scattered single-cell debris. 
+    We traverse up to this dynamic limit to guarantee bypassing debris.
 
     Returns initial k (int) which could include debris components. 
     Returns 1 if no ratio >= ratio_threshold.
     """
     sorted_desc = np.sort(edge_weights)[::-1]
-    # Check deeper into the edge list to avoid being masked by stray debris cells
-    n_check = min(max_edges_to_check, len(sorted_desc) - 1)
+    
+    # Biologically grounded search depth based on minimum mass constraints
+    dynamic_max_edges = max(10, int(n_cells * min_mass_fraction))
+    n_check = min(dynamic_max_edges, len(sorted_desc) - 1)
+    
     if n_check < 1:
         return 1
 
@@ -216,7 +223,7 @@ def _compute_stability_score(
     
     for t in thresholds:
         # Detect initial k (including debris)
-        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
+        k_init = _detect_k_from_mst(edge_weights, n, min_mass_fraction, ratio_threshold=t)
         # Build components and merge down to macroscopic structures
         labels_init = _build_components(mst, k_init, n)
         labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
@@ -311,7 +318,7 @@ def find_spatial_portions_mst(
     top_weights = sorted_desc[:n_top + 1]
     top_ratios = top_weights[:-1] / (top_weights[1:] + 1e-12)
 
-    k_init = _detect_k_from_mst(edge_weights, ratio_threshold=ratio_threshold)
+    k_init = _detect_k_from_mst(edge_weights, n, min_mass_fraction, ratio_threshold=ratio_threshold)
     labels = _build_components(mst, k_init, n)
 
     if merge_fragments:
