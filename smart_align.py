@@ -5,7 +5,7 @@ from scipy.spatial.distance import cdist
 import itertools
 import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
-from .hdbscan_spatial_portion_detection import find_spatial_portions_hdbscan as find_spatial_portions
+from .master_spatial_portion_detection import find_spatial_portions_master as find_spatial_portions
 
 class AlignmentConfig:
     """
