@@ -115,27 +115,64 @@ def _filter_low_density_debris(coords: np.ndarray, drop_fraction: float = 0.02) 
 
 def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
     """
-    Build the Euclidean Minimum Spanning Tree.
-
-    For n <= 5000 cells: exact O(n^2) pairwise distance matrix.
-    For n >  5000 cells: sparse k-NN graph via BallTree (O(n log n)).
-
-    The sparse approximation is exact for well-separated portions because
-    gap edges are always longer than any k-NN intra-portion edge when the
-    gap exceeds k times the typical inter-cell spacing.
+    Build the Shared Nearest Neighbor (SNN) based Minimum Spanning Tree.
+    
+    Biological Grounding:
+    Two tissue slices might be mounted physically touching each other (Euclidean distance = 0), 
+    but they do not share an extracellular matrix. By converting physical distances into 
+    SNN-Jaccard topological overlap, cells strictly spanning structural anatomical gaps 
+    suddenly possess an overlap of 0 (edge weight -> MAX), completely rejecting 
+    false continuum due to dense packing. 
     """
     n = len(coords)
-    if n <= 5_000:
-        dist_sparse = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
-    else:
-        tree = BallTree(coords, leaf_size=40)
-        k = min(knn_build + 1, n)
-        dists, indices = tree.query(coords, k=k)
-        rows = np.repeat(np.arange(n), k)
-        dist_sparse = sp.csr_matrix(
-            (dists.ravel(), (rows, indices.ravel())), shape=(n, n)
-        )
-        dist_sparse = dist_sparse + dist_sparse.T
+    k = min(knn_build + 1, n)
+    
+    # 1. Build the ultra-fast Euclidean k-NN graph
+    tree = BallTree(coords, leaf_size=40)
+    _, indices = tree.query(coords, k=k)
+    
+    rows = np.repeat(np.arange(n), k)
+    cols = indices.ravel()
+    
+    # 2. Create the binary adjacency matrix A (unweighted topology)
+    # Exclude self-loops temporarily for clean neighbor counts
+    mask = rows != cols  
+    A = sp.csr_matrix((np.ones(len(rows[mask])), (rows[mask], cols[mask])), shape=(n, n))
+    A.eliminate_zeros()
+    
+    # Make it symmetric (mutual connectivity matters)
+    A = A.maximum(A.T)
+    
+    # 3. Calculate topological intersection (SNN overlap)
+    # The dot product of a binary adjacency matrix with itself A.dot(A) 
+    # magically yields the exact number of shared neighbors between node i and node j.
+    intersections = A.dot(A)
+    
+    # We only care about weighting the original valid spatial k-NN edges
+    intersections = intersections.multiply(A)
+    
+    # 4. Calculate Jaccard distance = 1 - (Intersection / Union)
+    # Union = degree(i) + degree(j) - intersection
+    degrees = np.array(A.sum(axis=1)).flatten()
+    
+    inter_coo = intersections.tocoo()
+    union = degrees[inter_coo.row] + degrees[inter_coo.col] - inter_coo.data
+    
+    # Jaccard overlap ratio. Max is 1.0 (perfect internal tissue). Min is 0.0 (gap edge).
+    jaccard_similarity = inter_coo.data / union
+    
+    # Distance = 1.0 - Similarity. 
+    # (Gap edges will have distance ~ 1.0, dense internal matrix edges will have distance ~ 0.0)
+    # Add a tiny epsilon because scipy's MST algorithm explicitly ignores edges with a weight exactly equal to 0.0
+    jaccard_distance = (1.0 - jaccard_similarity) + 1e-6
+    
+    # 5. Build SNN Distance Graph
+    dist_sparse = sp.csr_matrix(
+        (jaccard_distance, (inter_coo.row, inter_coo.col)), 
+        shape=(n, n)
+    )
+    
+    # Construct MST on the topological Jaccard manifold
     return minimum_spanning_tree(dist_sparse)
 
 
@@ -314,7 +351,6 @@ def find_spatial_portions_mst(
     min_mass_fraction: float = 0.05,
     max_portions: int = 6,
     ratio_threshold: float = 1.8,
-    merge_fragments: bool = True,
     knn_build: int = 15,
 ) -> PortionDetectionResult:
     """
@@ -350,7 +386,6 @@ def find_spatial_portions_mst(
     # 1. Biological pre-filtering: vaporize "stepping stone" debris using structural density
     keep_mask = _filter_low_density_debris(coords, drop_fraction=0.02)
     filtered_coords = coords[keep_mask]
-    n_filtered = len(filtered_coords)
 
     # 2. Build MST on the dense structural manifold
     mst = _build_mst(filtered_coords, knn_build=knn_build)
@@ -410,7 +445,6 @@ def find_spatial_portions(
         adata,
         min_mass_fraction=config.min_mass_fraction,
         max_portions=max_portions,
-        merge_fragments=True,
     )
     
     # --- DEBUGGING INJECTION ---
