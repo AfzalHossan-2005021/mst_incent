@@ -179,7 +179,7 @@ class PortionDetectionResult:
 def find_spatial_portions_mst(
     adata: anndata.AnnData,
     max_portions: int = 4,
-    silhouette_threshold: float = 0.35,
+    silhouette_threshold: float = 0.1,
     min_mass_fraction: float = 0.05,
     max_cuts_scan: int = 15,
     knn_build: int = 15,
@@ -196,7 +196,7 @@ def find_spatial_portions_mst(
     ----------
     adata                : AnnData with .obsm['spatial'] (n × 2).
     max_portions         : Upper bound on k (default 4, matching original GMM).
-    silhouette_threshold : Minimum silhouette score to accept k>1 (default 0.35).
+    silhouette_threshold : Minimum silhouette score to accept k>1 (default 0.1).
     min_mass_fraction    : Each portion must hold >= this fraction (default 0.05).
     max_cuts_scan        : Cut positions scanned per k (default 15).
                            Increase if tissue has many bridge/scatter cells.
