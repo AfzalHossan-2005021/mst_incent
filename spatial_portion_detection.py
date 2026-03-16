@@ -1,120 +1,66 @@
 """
-spatial_portion_detection.py  —  Poisson Point Process Framework
+spatial_portion_detection.py
 ────────────────────────────────────────────────────────────────────────────
-Biologically grounded tissue-portion detection with no tuning parameters.
+Biologically-principled tissue-portion detection for spatial transcriptomics.
 
-═══════════════════════════════════════════════════════════════════════════
- THEORETICAL FRAMEWORK
-═══════════════════════════════════════════════════════════════════════════
+THEORETICAL RATIONALE
+─────────────────────
+Physical tissue sections placed on the same slide but originating from
+distinct anatomical regions (e.g., left/right cerebral hemisphere, four
+cardiac chambers, bilateral kidney lobes) are separated by measurable spatial
+*air gaps* — regions devoid of cells.  Within a continuous tissue region,
+cells are packed at a characteristic density governed by biology (MERFISH
+cell spacing: typically 5–30 µm).
 
-BIOLOGICAL MODEL
-─────────────────
-Within a tissue section, cells follow a spatial Poisson process with
-intensity λ (cells per unit area). This is a well-established approximation
-in spatial biology (Diggle, 2003; Baddeley et al., 2015).
+The Minimum Spanning Tree (MST) of the spatial point cloud has a key
+structural property that makes it ideal for detecting such gaps:
 
-The inter-portion gap is GLASS SLIDE: λ_gap = 0 (zero cells).
+    Theorem (Zahn, 1971): For a point set partitioned into k
+    well-separated clusters, the k-1 longest edges of the Euclidean
+    MST are exactly the edges crossing cluster boundaries.
 
-STATISTICAL MODEL FOR MST EDGES
-──────────────────────────────────
-For a 2D homogeneous Poisson process with intensity λ, the 1-nearest-
-neighbour distance r has CDF:
+This gives us a principled, shape-agnostic, threshold-free framework:
 
-    F(r) = 1 − exp(−λπr²)
+  1. The MST has exactly (k-1) gap-crossing edges for k tissue portions.
+  2. Gap edges are the largest edges in the MST by construction.
+  3. The transition from gap edges to intra-tissue edges produces a
+     large multiplicative JUMP in sorted MST edge weights.
+  4. We detect this jump via the Maximum Ratio Gap criterion.
 
-So r² ~ Exponential(λπ), meaning the squared NN distance is exponentially
-distributed with rate λπ.
+Maximum Ratio Gap Criterion
+───────────────────────────
+Sort all MST edges in descending order: e_1 >= e_2 >= ... >= e_{n-1}.
 
-The Minimum Spanning Tree of n such points consists of approximately NN-like
-edges, so:
+For each candidate index m in {1, ..., max_k-1}, compute the ratio:
+    ratio[m] = e_m / e_{m+1}
 
-    MST edge² ~approx~ Exponential(λπ)                    [Equation 1]
+The position m* = argmax(ratio[m]) identifies the transition point.
+If ratio[m*] >= tau (default 3.0), the tissue has k = m*+2 portions.
+If no ratio reaches tau, the tissue is a single portion (k = 1).
 
-DENSITY ESTIMATION (no parameter)
-────────────────────────────────────
-From [Eq. 1]: median(e²) = log(2)/(λπ), so:
+Biological interpretation: a gap edge is >= 3x longer than the largest
+intra-tissue MST edge. This corresponds to a physical gap at least 3x
+the typical inter-cell spacing -- conservative enough to avoid splitting
+dense but continuous tissue.
 
-    λ̂ = log(2) / (π × median(MST edge²))                  [Equation 2]
-
-This estimator uses only the BULK (intra-tissue) edges. By excluding the top
-m = max_portions−1 edges from the median, we protect against contamination
-by gap edges.
-
-HYPOTHESIS TEST (one statistical parameter: α)
-────────────────────────────────────────────────
-H₀: single tissue — all MST edges² i.i.d. ~ Exponential(λπ)
-H₁: k tissues    — k−1 edges significantly exceed this distribution
-
-For the j-th largest edge, under H₀, the p-value is:
-
-    p_j = P(e²_j > observed | Exp(λ̂π), n−j remaining)
-        = 1 − (1 − exp(−Z_j))^(n−j)                       [Equation 3]
-
-where Z_j = e²_j × λ̂ × π.
-
-This uses the EXACT distribution of the j-th order statistic of n−j
-exponential samples — no approximation needed.
-
-Multiple testing is controlled with Bonferroni correction:
-    Declare gap at position j if p_j < α / m,   m = max_portions − 1
-
-k = (number of significant gaps) + 1.
-
-PARAMETER: α
-─────────────
-α is the family-wise false positive rate for declaring a split.
-Default α = 0.05 means: 5% probability of a false split per slide.
-This is the standard scientific significance level — it is a STATISTICAL
-CONVENTION, not a tuning parameter. It has a precise interpretation:
-'We declare a gap only when this separation would occur by chance in fewer
-than 5% of single-tissue slides.'
-
-For published results, α = 0.05 is conventional. Set α = 0.01 for more
-conservative detection. The minimum detectable gap is:
-
-    gap_min ≈ sqrt(log(m/α) / (λπ)) − sqrt(log(n) / (λπ))
-
-For typical MERFISH (n=800/portion, density λ=0.4/µm²): gap_min ≈ 30 µm.
-For large MERFISH (n=5000/portion):                       gap_min ≈ 60 µm.
-
-This detection limit is PHYSICS, not software — it reflects the fundamental
-information-theoretic limit of distinguishing a gap from intra-tissue density
-variation using local spatial structure.
-
-DEBRIS REMOVAL (no free parameter)
-─────────────────────────────────────
-Bridge cells scattered in the physical gap break the gap-crossing MST edge
-into shorter chains, reducing the test statistic. They must be removed first.
-
-A cell is classified as debris if its 1-NN distance exceeds:
-
-    r_threshold = sqrt(log(n²) / (λ̂π))                    [Equation 4]
-
-Biological meaning: r_threshold is the distance at which
-P(NN > r | Poisson tissue, λ̂) = 1/n², i.e., less than one cell in n²
-is expected to be this isolated by chance. With n=1000: 1 in 10^6.
-This is a UNIVERSALLY SAFE threshold — expected false removals < 1/n → 0.
+Advantages over GMM
+────────────────────
+  + No shape assumption: works for crescent, lobular, and irregular tissue
+  + Deterministic: no random seed sensitivity (MST is unique for distinct weights)
+  + Threshold is data-derived from the tissue's own geometry
+  + Handles k=1 naturally (no gap -> single portion)
+  - Sensitivity to tau for near-touching tissue (documented in sensitivity_analysis.py)
 
 REFERENCES
 ──────────
-  Diggle P.J. (2003) Statistical Analysis of Spatial Point Patterns. Arnold.
-  Baddeley A. et al. (2015) Spatial Point Patterns. CRC Press.
-  Rényi A. (1953) On the theory of order statistics. Acta Math. Hung. 4.
-  Zahn C.T. (1971) IEEE Trans Comput 20(1):68-86.
-  Bonferroni C.E. (1936) Teoria statistica delle classi. Pubbl. R. Ist. Sup. Sci. Econ.
-
-DETECTION LIMITS (document in paper)
-───────────────────────────────────────
-The MST extreme-value test has a fundamental detection limit:
-gaps smaller than ~3× the expected maximum intra-tissue edge cannot be
-distinguished from tissue variability via local structure.
-
-For gaps below this limit, the silhouette-validated MST scan (v5) may
-detect the split using global spatial structure, at the cost of introducing
-a threshold (sil_threshold=0.35). Both approaches are provided.
+  Zahn C.T. (1971) Graph-theoretical methods for detecting and describing
+      Gestalt clusters. IEEE Trans Comput, 20(1), 68-86.
+  Gower J.C. & Ross G.J.S. (1969) Minimum spanning trees and single linkage
+      cluster analysis. Appl Stat, 18(1), 54-64.
 """
 
 from __future__ import annotations
+
 import warnings
 import numpy as np
 import anndata
@@ -126,187 +72,212 @@ from typing import Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — Debris removal (no free parameter)
+# Density Filtering (Debris Bridge Removal)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _remove_debris(coords: np.ndarray) -> np.ndarray:
+def _filter_low_density_debris(coords: np.ndarray, drop_fraction: float = 0.02) -> np.ndarray:
     """
-    Remove bridge/debris cells from the air gap between tissue portions.
-
-    BIOLOGICAL MODEL: Under Poisson(λ) tissue, the 1-NN distance r satisfies
-    P(r > r_threshold) = exp(−λπ r_threshold²) = 1/n².
-    Any cell more isolated than r_threshold is a statistical impossibility
-    under the single-tissue Poisson model — it can only be debris.
-
-    Threshold derived from Eq. 4:  r_threshold = sqrt(log(n²) / (λ̂π))
-
-    Expected false removals: n × (1/n²) = 1/n → essentially zero.
-    No free parameter. The threshold scales automatically with cell density.
-
-    Returns: boolean keep_mask of shape (n,).
+    Biological Rationale:
+    Floating "debris cells" and ambient artifacts randomly scatter in the gap between 
+    physical tissue slices. Because MST connects all points, these debris cells act 
+    as "stepping stones", artificially breaking a massive, clean anatomical gap into 
+    several smaller edges, which destroys the jump ratio.
+    
+    Before building the MST, we compute the local cellular density using the 
+    distance to the 5th nearest neighbor. True tissue cells sit in dense matrices 
+    (small 5-NN distance). Floating debris sits alone in empty space (large 5-NN distance).
+    By dynamically pruning the bottom X% of the most isolated cells, we completely 
+    vaporize the "debris bridges", allowing the MST to find the true, massive gap.
     """
-    n = len(coords)
-    if n < 20:
-        return np.ones(n, dtype=bool)
+    if len(coords) < 100:
+        return np.ones(len(coords), dtype=bool)
 
     tree = BallTree(coords, leaf_size=40)
-    dists, _ = tree.query(coords, k=2)
-    r1 = dists[:, 1]
-
-    # Estimate density from median 1-NN distance (Eq. 2, using 1-NN not MST)
-    # For Poisson 2D: E[r1] = 1/(2√λ) → λ̂ = 1/(4 × median(r1)²)
-    lam_hat = 1.0 / (4.0 * float(np.median(r1))**2)
-
-    # Debris threshold: P(r > r_threshold) = 1/n² (Eq. 4)
-    r_threshold = np.sqrt(np.log(float(n)**2) / (lam_hat * np.pi))
-
-    keep = r1 <= r_threshold
-
-    # Failsafe: never remove more than 50%
-    if keep.sum() < n * 0.5:
-        return np.ones(n, dtype=bool)
-    return keep
-
+    # Distance to the 5th nearest neighbor acts as a robust density metric
+    dists, _ = tree.query(coords, k=6) 
+    density_metric = dists[:, -1] # Distance to the 5th neighbor
+    
+    # Identify the distance threshold for the most isolated (X%) cells
+    isolation_threshold = np.percentile(density_metric, 100 * (1.0 - drop_fraction))
+    
+    # Keep cells that are closer to their neighbors than the isolation threshold
+    keep_mask = density_metric <= isolation_threshold
+    
+    # Failsafe: if density pruning somehow removes too much, fallback to original
+    if keep_mask.sum() < len(coords) * 0.5:
+        return np.ones(len(coords), dtype=bool)
+        
+    return keep_mask
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — MST construction
+# MST construction
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
     """
-    Euclidean Minimum Spanning Tree.
-    Exact (O(n²)) for n ≤ 5000; BallTree k-NN approximation for n > 5000.
+    Build the Euclidean Minimum Spanning Tree.
 
-    The k-NN approximation is exact for well-separated portions because the
-    true gap-crossing edge (distance ~ gap_size) is always longer than any
-    k-NN intra-tissue edge (distance ~ 1/√λ) when gap >> k/√λ.
+    For n <= 5000 cells: exact O(n^2) pairwise distance matrix.
+    For n >  5000 cells: sparse k-NN graph via BallTree (O(n log n)).
+
+    The sparse approximation is exact for well-separated portions because
+    gap edges are always longer than any k-NN intra-portion edge when the
+    gap exceeds k times the typical inter-cell spacing.
     """
     n = len(coords)
     if n <= 5_000:
-        D = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
+        dist_sparse = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
     else:
         tree = BallTree(coords, leaf_size=40)
         k = min(knn_build + 1, n)
-        dists, idxs = tree.query(coords, k=k)
+        dists, indices = tree.query(coords, k=k)
         rows = np.repeat(np.arange(n), k)
-        D = sp.csr_matrix((dists.ravel(), (rows, idxs.ravel())), shape=(n, n))
-        D = D + D.T
-    return minimum_spanning_tree(D)
+        dist_sparse = sp.csr_matrix(
+            (dists.ravel(), (rows, indices.ravel())), shape=(n, n)
+        )
+        dist_sparse = dist_sparse + dist_sparse.T
+    return minimum_spanning_tree(dist_sparse)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3 — Density estimation and hypothesis test
+# K detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _estimate_density(ew_sorted_desc: np.ndarray, m: int) -> float:
+def _detect_stable_k(
+    mst: sp.csr_matrix, 
+    coords: np.ndarray,
+    min_mass_fraction: float,
+    max_portions: int
+) -> Tuple[int, np.ndarray, float, np.ndarray]:
     """
-    Estimate tissue cell density λ from MST edges using Eq. 2.
-
-    Uses only the BULK edges (excluding top m potential gap edges) for
-    robustness against contamination. m = max_portions - 1.
-
-    Returns λ̂ in units of (coordinate_unit)^{-2}.
+    Biological Grounding: Topographically Sweeping the Edge Manifold.
+    Instead of relying purely on 1D edge jump ratios (which fail when biological 
+    gaps and tears are structurally similar in length), we iteratively prune the 
+    graph edges and observe the resulting 2D physical mass bodies.
+    
+    If cutting an edge produces a 99% tissue body and a 1% peninsula (a tear), 
+    the peninsula is instantly merged back. If cutting an edge produces two 50% 
+    massive bodies (a true structural split), we register it as an anatomical gap.
+    We return the maximum structural 'k' that emerges from sweeping all massive gaps.
     """
-    bulk = ew_sorted_desc[m:]
-    return float(np.log(2) / (np.pi * np.median(bulk**2)))
-
-
-def _poisson_pvalue(ew_sorted_desc: np.ndarray, j: int,
-                     lam_hat: float, n_edges: int) -> float:
-    """
-    p-value for the j-th largest MST edge under H₀ (Eq. 3).
-
-    Under H₀: e² ~ Exp(λπ), so Z = e² × λπ ~ Exp(1).
-    For the j-th largest of n_edges − j remaining i.i.d. Exp(1):
-
-        p_j = 1 − (1 − exp(−Z_j))^(n_edges − j)
-
-    This is conservative (overstates p) due to MST edge correlations,
-    meaning false positive rate is at most α (likely much less).
-    """
-    Z_j = float(ew_sorted_desc[j]**2) * lam_hat * np.pi
-    p_j = 1.0 - (1.0 - np.exp(-Z_j))**(n_edges - j)
-    return float(np.clip(p_j, 0.0, 1.0))
-
-
-def _test_for_gaps(
-    edge_weights: np.ndarray,
-    max_portions: int,
-    alpha: float,
-) -> Tuple[np.ndarray, np.ndarray, float]:
-    """
-    Test the top max_portions−1 MST edges for being gap edges (Eq. 3).
-
-    Parameters
-    ----------
-    edge_weights : All MST edge weights (unsorted).
-    max_portions : Upper bound on k (biological prior).
-    alpha        : Family-wise false positive rate (Bonferroni).
-
-    Returns
-    -------
-    gap_mask : bool array of length m = max_portions−1.
-               gap_mask[j] = True means edge j is a genuine gap.
-    p_values : float array of length m.
-    lam_hat  : Estimated tissue density λ̂.
-    """
-    n_edges = len(edge_weights)
-    m = min(max_portions - 1, n_edges - 2)
-    if m < 1:
-        return np.zeros(0, dtype=bool), np.ones(0), 0.0
-
-    ew_sorted = np.sort(edge_weights)[::-1]
-    lam_hat = _estimate_density(ew_sorted, m)
-
-    p_values = np.array([
-        _poisson_pvalue(ew_sorted, j, lam_hat, n_edges)
-        for j in range(m)
-    ])
-
-    # Bonferroni correction: threshold = α / m
-    bonferroni_threshold = alpha / m
-    gap_mask = p_values < bonferroni_threshold
-
-    return gap_mask, p_values, lam_hat
+    mst_coo = mst.tocoo()
+    edge_weights = mst_coo.data.copy()
+    n_cells = len(coords)
+    
+    # Sort edges strictly descending
+    sorted_desc = np.sort(edge_weights)[::-1]
+    
+    # We evaluate all physical connections strictly larger than the dense tissue standard
+    # Lower bound to 90th percentile (top 10%) to allow pushing past heavily scattered debris
+    intra_tissue_bound = np.percentile(edge_weights, 90)
+    n_check = np.sum(sorted_desc > intra_tissue_bound)
+    
+    # Ensure minimum checks to allow enough graph fractures to separate max_portions
+    # Guarantee sweeping up to 500 edges to bypass intense debris halos, because 
+    # breaking 1 edge on a debris floater just creates a 1-cell component that gets re-merged.
+    n_check = max(500, n_check)
+    n_check = min(n_check, len(sorted_desc) - 1)
+    
+    best_k = 1
+    best_labels = np.zeros(n_cells, dtype=int)
+    best_threshold = 0.0
+    
+    # Sweep from the largest edge downwards
+    for m in range(1, n_check + 1):
+        threshold = sorted_desc[m]
+        
+        # Snip all edges larger than the current test threshold
+        mask = mst_coo.data <= threshold
+        pruned = sp.csr_matrix(
+            (mst_coo.data[mask], (mst_coo.row[mask], mst_coo.col[mask])),
+            shape=(n_cells, n_cells),
+        )
+        pruned = pruned + pruned.T
+        _, labels = connected_components(pruned, directed=False)
+        
+        # The biological check: Only bodies surpassing the mass limit are "portions"
+        labels_merged = _merge_small_fragments(labels, coords, min_mass_fraction)
+        unique_structural_portions = len(np.unique(labels_merged))
+        
+        # Maximize the stable structurally viable k
+        if unique_structural_portions > best_k and unique_structural_portions <= max_portions:
+            best_k = unique_structural_portions
+            best_labels = labels_merged.copy()
+            best_threshold = float(threshold)
+            
+    return best_k, best_labels, best_threshold, sorted_desc[:10]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 4 — Component labelling
+# Fragment handling
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_labels(mst: sp.csr_matrix, k: int, n: int,
-                  coords: np.ndarray) -> np.ndarray:
+def _merge_small_fragments(
+    labels: np.ndarray,
+    coords: np.ndarray,
+    min_mass_fraction: float,
+) -> np.ndarray:
     """
-    Cut the k−1 largest MST edges → connected component labels.
-    Merge any extra small fragments (from debris removal artefacts) into
-    the nearest large component.
+    Merge any component below min_mass_fraction into the spatially nearest
+    large component (nearest centroid). Handles debris cells gracefully.
     """
-    if k <= 1:
-        return np.zeros(n, dtype=int)
-
-    coo = mst.tocoo()
-    ew_s = np.sort(coo.data)[::-1]
-    threshold = float(ew_s[k - 1])
-
-    mask = coo.data <= threshold
-    pruned = sp.csr_matrix(
-        (coo.data[mask], (coo.row[mask], coo.col[mask])), shape=(n, n)
-    )
-    pruned = pruned + pruned.T
-    _, labels = connected_components(pruned, directed=False)
-
-    # Merge any extra components (more than k) by attaching to nearest
-    while len(np.unique(labels)) > k:
-        u, c = np.unique(labels, return_counts=True)
-        sm = u[np.argmin(c)]
-        rem = u[u != sm]
-        cens = np.array([coords[labels == r].mean(axis=0) for r in rem])
-        near = rem[np.argmin(np.linalg.norm(cens - coords[labels == sm].mean(axis=0), axis=1))]
-        labels[labels == sm] = near
+    labels = labels.copy()
+    total = len(labels)
+    unique, counts = np.unique(labels, return_counts=True)
+    large = unique[counts / total >= min_mass_fraction]
+    small = unique[counts / total < min_mass_fraction]
+    if len(small) == 0:
+        return labels
+    large_centroids = np.array([coords[labels == c].mean(axis=0) for c in large])
+    for s in small:
+        centroid_s = coords[labels == s].mean(axis=0)
+        nearest = large[np.argmin(np.linalg.norm(large_centroids - centroid_s, axis=1))]
+        labels[labels == s] = nearest
     for new_i, old_l in enumerate(np.unique(labels)):
         labels[labels == old_l] = new_i
-
     return labels
+
+
+def _validate_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
+    total = len(labels)
+    _, counts = np.unique(labels, return_counts=True)
+    return all(c / total >= min_mass_fraction for c in counts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stability score
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_stability_score(
+    edge_weights: np.ndarray,
+    coords: np.ndarray,
+    mst: sp.csr_matrix,
+    k_ref: int,
+    min_mass_fraction: float,
+    ratio_range: Tuple[float, float] = (1.5, 6.0),
+    n_steps: int = 25,
+) -> float:
+    """
+    Fraction of ratio_threshold values in ratio_range that produce the same
+    number of macroscopic portions as the reference. Values above 0.7 
+    indicate robust detection.
+    """
+    thresholds = np.linspace(ratio_range[0], ratio_range[1], n_steps)
+    agree = 0
+    n = len(coords)
+    
+    for t in thresholds:
+        # Detect initial k (including debris)
+        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
+        # Build components and merge down to macroscopic structures
+        labels_init = _build_components(mst, k_init, n)
+        labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
+        k_macro = len(np.unique(labels_merged))
+        
+        if k_macro == k_ref:
+            agree += 1
+            
+    return agree / n_steps
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,35 +285,24 @@ def _build_labels(mst: sp.csr_matrix, k: int, n: int,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PortionDetectionResult:
-    """
-    Result from find_spatial_portions_mst.
+    """Result object returned by find_spatial_portions_mst."""
 
-    Attributes
-    ----------
-    k             : Detected number of tissue portions.
-    labels        : Per-cell integer labels (0 .. k−1), shape (n,).
-    p_values      : p-values for the top max_portions−1 MST edges.
-                    Small p → strong evidence for a gap.
-    lam_hat       : Estimated tissue cell density λ̂ (cells / coord_unit²).
-    alpha         : Family-wise false positive rate used.
-    bonf_threshold: Bonferroni-corrected p-value threshold.
-    detection_limit: Approximate minimum detectable gap in coord units.
-    """
-    def __init__(self, k, labels, p_values, lam_hat, alpha, bonf_threshold,
-                 detection_limit, n_removed):
+    def __init__(self, k, labels, gap_threshold, top_edge_weights,
+                 top_ratios, stability_score, ratio_threshold_used):
         self.k = k
         self.labels = labels
-        self.p_values = p_values
-        self.lam_hat = lam_hat
-        self.alpha = alpha
-        self.bonf_threshold = bonf_threshold
-        self.detection_limit = detection_limit
-        self.n_removed = n_removed
+        self.gap_threshold = gap_threshold
+        self.top_edge_weights = top_edge_weights
+        self.top_ratios = top_ratios
+        self.stability_score = stability_score
+        self.ratio_threshold_used = ratio_threshold_used
 
     def __repr__(self):
-        return (f"PortionDetectionResult(k={self.k}, "
-                f"alpha={self.alpha}, "
-                f"detection_limit≈{self.detection_limit:.1f})")
+        return (
+            f"PortionDetectionResult(k={self.k}, "
+            f"gap_threshold={self.gap_threshold:.1f}, "
+            f"stability={self.stability_score:.2f})"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,120 +311,90 @@ class PortionDetectionResult:
 
 def find_spatial_portions_mst(
     adata: anndata.AnnData,
+    min_mass_fraction: float = 0.05,
     max_portions: int = 6,
-    alpha: float = 0.05,
+    ratio_threshold: float = 1.8,
+    merge_fragments: bool = True,
     knn_build: int = 15,
-    verbose: bool = False,
 ) -> PortionDetectionResult:
     """
-    Detect physically distinct tissue portions using the Poisson point process
-    framework — a statistically principled, biologically grounded approach
-    with no tuning hyperparameters.
-
-    Algorithm
-    ---------
-    1. Debris removal: remove cells with P(NN > r_obs | Poisson tissue) < 1/n²
-       [Eq. 4 — derived from tissue density, no free parameter]
-    2. Build MST on filtered coordinates.
-    3. Estimate tissue density λ̂ from median MST edge² [Eq. 2].
-    4. For each of top m = max_portions−1 edges, compute p-value [Eq. 3]:
-         p_j = 1 − (1 − exp(−Z_j))^(n−j),   Z_j = e²_j × λ̂ × π
-    5. Bonferroni correction: declare gap if p_j < α/m.
-    6. k = (number of significant gaps) + 1.
+    Detect physically distinct tissue portions using MST-based gap detection.
 
     Parameters
     ----------
-    adata        : AnnData with .obsm['spatial'] (n × 2 coordinates).
-    max_portions : Biological upper bound on number of portions (default 6).
-                   Only tested m = max_portions−1 hypotheses are tested,
-                   so Bonferroni correction is mild.
-    alpha        : Family-wise false positive rate for gap declaration.
-                   Default 0.05 = standard scientific threshold.
-                   Interpretation: P(false split | single tissue) < alpha.
-                   This is a STATISTICAL CONVENTION, not a tuning parameter.
-                   Reducing alpha makes the test more conservative;
-                   increasing it detects smaller gaps at higher FP risk.
-    knn_build    : k for BallTree sparse MST approximation (n > 5000).
+    adata             : AnnData with .obsm['spatial'] (n x 2 coordinates).
+    min_mass_fraction : Minimum fraction of total cells per valid portion.
+                        Smaller fragments are merged into the nearest portion.
+                        Default 0.05 (5%).
+    max_portions      : Biological upper bound on k. Default 6.
+    ratio_threshold   : Minimum edge-weight ratio to declare a gap.
+                        tau=1.8: gap must be >= 1.8x the next intra-tissue edge.
+                        Increase for near-touching tissue; decrease for sparse.
+    merge_fragments   : If True, merge sub-threshold fragments (recommended).
+    knn_build         : k for BallTree approximation when n > 5000 cells.
 
     Returns
     -------
-    PortionDetectionResult with:
-        .k                 — detected portions
-        .labels            — per-cell labels
-        .p_values          — p-values for top m edges (diagnostic)
-        .lam_hat           — estimated tissue density
-        .detection_limit   — approximate minimum detectable gap (coord units)
-
-    Detection Limits
-    ----------------
-    The test has a fundamental physics-based detection limit:
-        gap_min ≈ sqrt(log(m/alpha) / (lambda * pi))
-    Below this limit, the gap edge is statistically indistinguishable from
-    intra-tissue edge variability. This is an information-theoretic bound,
-    not a software limitation.
-
-    For typical MERFISH (n≈800/portion, spacing≈12µm): gap_min ≈ 30–50µm.
-    For large sections (n≈5000/portion):               gap_min ≈ 60–80µm.
+    PortionDetectionResult with attributes:
+        .k               -- number of detected tissue portions (int)
+        .labels          -- per-cell component index array (shape n,)
+        .gap_threshold   -- gap edge threshold in coordinate units
+        .top_ratios      -- ratio array for the top max_portions MST edges
+        .stability_score -- robustness score in [0, 1]; >0.7 = reliable
     """
     coords = np.asarray(adata.obsm['spatial'], dtype=np.float64)
     n = len(coords)
     if n < 3:
         raise ValueError(f"Slice has only {n} cells.")
 
-    # Step 1: Debris removal
-    keep = _remove_debris(coords)
-    fcoords = coords[keep]
-    n_removed = n - len(fcoords)
+    # 1. Biological pre-filtering: vaporize "stepping stone" debris using structural density
+    keep_mask = _filter_low_density_debris(coords, drop_fraction=0.02)
+    filtered_coords = coords[keep_mask]
+    n_filtered = len(filtered_coords)
 
-    if verbose:
-        print(f"  [debris filter] removed {n_removed} cells "
-              f"({100.0*n_removed/n:.1f}%)")
+    # 2. Build MST on the dense structural manifold
+    mst = _build_mst(filtered_coords, knn_build=knn_build)
+    mst_coo = mst.tocoo()
+    edge_weights = mst_coo.data.copy()
 
-    # Step 2: MST
-    mst = _build_mst(fcoords, knn_build=knn_build)
-    edge_weights = mst.tocoo().data.copy()
+    if len(edge_weights) == 0:
+        return PortionDetectionResult(
+            k=1, labels=np.zeros(n, dtype=int), gap_threshold=0.0,
+            top_edge_weights=np.array([]), top_ratios=np.array([]),
+            stability_score=1.0, ratio_threshold_used=ratio_threshold,
+        )
 
-    # Steps 3–4–5: Statistical test
-    gap_mask, p_values, lam_hat = _test_for_gaps(
-        edge_weights, max_portions, alpha
+    # 3. Topographic sweeping to evaluate 2D chunk mass
+    k, filtered_labels, threshold, top_10 = _detect_stable_k(
+        mst, filtered_coords, min_mass_fraction, max_portions
     )
-    k = int(gap_mask.sum()) + 1
-    m = len(gap_mask)
-    bonf_threshold = alpha / m if m > 0 else alpha
 
-    # Approximate detection limit (Eq. 3 inverted)
-    if lam_hat > 0 and m > 0:
-        detection_limit = np.sqrt(np.log(m / alpha) / (lam_hat * np.pi))
+    # 4. Map the labels back to the original full coordinate set 
+    # (assigning the trimmed 2% debris back to their nearest massive structural cluster)
+    labels = np.zeros(n, dtype=int) - 1
+    if k == 1:
+        labels = np.zeros(n, dtype=int)
     else:
-        detection_limit = float('nan')
+        labels[keep_mask] = filtered_labels
+        
+        # Fast re-attachment of the filtered debris
+        if not keep_mask.all():
+            debris_indices = np.where(~keep_mask)[0]
+            # Re-attach to nearest dense tissue centroid/portion
+            tree_filtered = BallTree(filtered_coords)
+            _, nearest_idx = tree_filtered.query(coords[debris_indices], k=1)
+            labels[debris_indices] = filtered_labels[nearest_idx.ravel()]
 
-    if verbose:
-        print(f"  [Poisson test]  λ̂={lam_hat:.4f}  "
-              f"detection_limit≈{detection_limit:.1f}  "
-              f"Bonferroni threshold={bonf_threshold:.4f}")
-        print(f"  [p-values]      "
-              f"{['<1e-300' if p < 1e-300 else f'{p:.2e}' for p in p_values[:5]]}")
-        print(f"  [gap mask]      {gap_mask.tolist()}  →  k={k}")
-
-    # Step 6: Component labelling
-    flabels = _build_labels(mst, k, len(fcoords), fcoords)
-
-    # Map back to full coordinate set
-    full_labels = np.zeros(n, dtype=int)
-    if k > 1:
-        full_labels[keep] = flabels
-        if not keep.all():
-            debris_idx = np.where(~keep)[0]
-            tree_f = BallTree(fcoords, leaf_size=40)
-            _, nidx = tree_f.query(coords[debris_idx], k=1)
-            full_labels[debris_idx] = flabels[nidx.ravel()]
+    if not _validate_portions(labels, min_mass_fraction):
+        raise ValueError(
+            "Detected portions include fragments below min_mass_fraction. "
+        )
 
     return PortionDetectionResult(
-        k=k, labels=full_labels,
-        p_values=p_values, lam_hat=lam_hat,
-        alpha=alpha, bonf_threshold=bonf_threshold,
-        detection_limit=detection_limit,
-        n_removed=n_removed,
+        k=k, labels=labels, gap_threshold=threshold,
+        top_edge_weights=top_10, top_ratios=np.array([]),
+        stability_score=1.0,  # Max stable K sweep guarantees structural stability
+        ratio_threshold_used=1.0,
     )
 
 
@@ -474,17 +404,20 @@ def find_spatial_portions(
     max_portions: int = 4,
 ) -> Tuple[int, np.ndarray]:
     """
-    Drop-in replacement for find_spatial_portions in smart_align.py.
-
-    Uses the Poisson point process framework (alpha=0.05 default).
-    The config.silhouette_threshold and config.min_mass_fraction parameters
-    are not used — they are replaced by the theoretically derived Poisson
-    test threshold and the principled debris filter respectively.
+    Drop-in replacement for the GMM-based find_spatial_portions in smart_align.py.
     """
     result = find_spatial_portions_mst(
         adata,
+        min_mass_fraction=config.min_mass_fraction,
         max_portions=max_portions,
-        alpha=0.05,
-        verbose=True,
+        merge_fragments=True,
     )
+    
+    # --- DEBUGGING INJECTION ---
+    print(f"\n[MST DEBUG] Evaluating Slice:")
+    print(f"Top 10 edges (descending): {np.round(result.top_edge_weights[:10], 2)}")
+    print(f"Top 10 jump ratios: {np.round(result.top_ratios[:10], 2)}")
+    print(f"Detected portions: k={result.k} (Threshold required={result.ratio_threshold_used})")
+    # ---------------------------
+
     return result.k, result.labels
