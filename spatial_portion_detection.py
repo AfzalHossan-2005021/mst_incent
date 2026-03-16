@@ -369,20 +369,6 @@ def find_spatial_portions(
 ) -> Tuple[int, np.ndarray]:
     """
     Drop-in replacement for the GMM-based find_spatial_portions in smart_align.py.
-
-    The AlignmentConfig.silhouette_threshold parameter has no equivalent here
-    and is intentionally ignored -- geometric separation is now measured
-    directly via the ratio criterion, not as a post-hoc silhouette proxy.
-
-    Parameters
-    ----------
-    adata        : AnnData with .obsm['spatial'].
-    config       : AlignmentConfig. Uses .min_mass_fraction.
-    max_portions : Upper bound on k.
-
-    Returns
-    -------
-    (k, labels) -- same as the original GMM-based function.
     """
     result = find_spatial_portions_mst(
         adata,
@@ -390,4 +376,12 @@ def find_spatial_portions(
         max_portions=max_portions,
         merge_fragments=True,
     )
+    
+    # --- DEBUGGING INJECTION ---
+    print(f"\n[MST DEBUG] Evaluating Slice:")
+    print(f"Top 10 edges (descending): {np.round(result.top_edge_weights[:10], 2)}")
+    print(f"Top 10 jump ratios: {np.round(result.top_ratios[:10], 2)}")
+    print(f"Detected portions: k={result.k} (Threshold required={result.ratio_threshold_used})")
+    # ---------------------------
+
     return result.k, result.labels
