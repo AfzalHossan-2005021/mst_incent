@@ -170,14 +170,14 @@ def detect_hdbscan_portions(
     min_samples = max(5, int(n_cells * min_samples_fraction))
 
     # Estimate spatial scale
-    spatial_scale = estimate_spatial_scale(coords, knn_k)
+    spatial_scale = float(estimate_spatial_scale(coords, int(knn_k)))
 
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
+        min_cluster_size=int(min_cluster_size),
+        min_samples=int(min_samples),
         metric="euclidean",
         cluster_selection_method="eom",
-        cluster_selection_epsilon=spatial_scale * 1.5
+        cluster_selection_epsilon=float(spatial_scale * 1.5)
     )
 
     labels = clusterer.fit_predict(coords)
