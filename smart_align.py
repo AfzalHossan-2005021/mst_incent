@@ -9,6 +9,7 @@ from sklearn.metrics import silhouette_score
 from scipy.spatial.distance import cdist
 import itertools
 from .INCENT import pairwise_align
+from .spatial_portion_detection import find_spatial_portions
 
 class AlignmentConfig:
     """
@@ -154,57 +155,6 @@ def get_hausdorff_disparity(coords_A, coords_B, percentile=95, allow_reflection=
     
     return max(h1, h2)
 
-def find_spatial_portions(adata: anndata.AnnData, config: AlignmentConfig, max_portions: int = 4) -> tuple[int, np.ndarray]:
-    """
-    Detects the number of physical portions (e.g. 1 vs 2 hemispheres, or 4 for a heart) 
-    based on spatial clustering. Includes stability checkpoints for noise resilience.
-    """
-    coords = adata.obsm['spatial']
-    
-    best_k = 1
-    best_labels = np.zeros(len(coords), dtype=int)
-    best_score = -1
-
-    for k in range(2, max_portions + 1):
-        scores = []
-        label_inits = []
-        
-        if getattr(config, 'clustering_method', 'gmm') == 'hierarchical':
-            # Use spatial connectivity graph to ensure continuous anatomical regions 
-            # (addresses the GMM "ellipsoidal" failure on complex shapes like crescent cortical layers)
-            try:
-                connectivity = kneighbors_graph(coords, n_neighbors=10, include_self=False)
-                model = AgglomerativeClustering(n_clusters=k, connectivity=connectivity, linkage='ward')
-                labels = model.fit_predict(coords)
-                score = silhouette_score(coords, labels)
-                
-                if score > config.silhouette_threshold and validate_strictly_structural_portions(labels, config.min_mass_fraction):
-                    scores.append(score)
-                    label_inits.append(labels)
-            except Exception:
-                pass
-        else:
-            # GMM multi-seed stability check
-            for seed in range(5):
-                gmm = GaussianMixture(n_components=k, random_state=seed, covariance_type='full', n_init=3)
-                labels = gmm.fit_predict(coords)
-                score = silhouette_score(coords, labels)
-                
-                if score > config.silhouette_threshold and validate_strictly_structural_portions(labels, config.min_mass_fraction):
-                    scores.append(score)
-                    label_inits.append(labels)
-                    
-        # Must successfully detect same macroscopic clustering across required valid runs
-        required_stable_runs = 1 if getattr(config, 'clustering_method', 'gmm') == 'hierarchical' else 3
-        if len(scores) >= required_stable_runs:
-            avg_score = np.mean(scores)
-            if avg_score > best_score:
-                best_score = avg_score
-                best_k = k
-                # Lock in the highest scoring iteration
-                best_labels = label_inits[np.argmax(scores)]
-            
-    return best_k, best_labels
 
 def _visualize_portions_inline(adata, labels, title):
     """
