@@ -248,7 +248,7 @@ def find_spatial_portions_mst(
     merge_fragments: bool = True,
     knn_build: int = 15,
     cell_type_key: Optional[str] = 'cell_type_annot',
-    lambda_weight: float = 1.0,
+    lambda_weight: float = 2.0,
 ) -> PortionDetectionResult:
     """
     Detect physically distinct tissue portions using MST-based gap detection,
