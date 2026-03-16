@@ -11,6 +11,7 @@ from anndata import AnnData
 from numpy.typing import NDArray
 from typing import Optional, Tuple, Union
 
+from .geodesic_topology import compute_geodesic_cost_matrix
 from .utils import fused_gromov_wasserstein_incent, to_dense_array, extract_data_matrix, jensenshannon_divergence_backend, pairwise_msd
 
 
@@ -155,8 +156,8 @@ def pairwise_align(
     if isinstance(nx,ot.backend.TorchBackend):
         coordinatesA = coordinatesA.float()
         coordinatesB = coordinatesB.float()
-    D_A = ot.dist(coordinatesA,coordinatesA, metric='euclidean')
-    D_B = ot.dist(coordinatesB,coordinatesB, metric='euclidean')
+    D_A = compute_geodesic_cost_matrix(coordinatesA)
+    D_B = compute_geodesic_cost_matrix(coordinatesB)
 
     # --- CRITICAL GEOMETRIC SCALING ---
     # To achieve perfect structural alignment regardless of slices being from different 

@@ -1,11 +1,10 @@
 import numpy as np
 import pandas as pd
-import anndata
 from scipy.spatial.distance import cdist
 import itertools
 import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
-from .hybrid_partition_detection import find_spatial_portions_hybrid as find_spatial_portions
+from .simple_hdbscan import find_spatial_portions_hdbscan as find_spatial_portions
 
 class AlignmentConfig:
     """
