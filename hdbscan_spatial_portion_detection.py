@@ -154,7 +154,7 @@ def enforce_spatial_connectivity(coords: np.ndarray, labels: np.ndarray) -> np.n
 
 def detect_hdbscan_portions(
     coords: np.ndarray,
-    config,
+    config: HDBSCANPortionConfig
 ) -> np.ndarray:
 
     coords = np.asarray(coords, dtype=np.float32)
