@@ -263,6 +263,14 @@ def _merge_small_fragments(
     unique, counts = np.unique(labels, return_counts=True)
     large = unique[counts / total >= min_mass_fraction]
     small = unique[counts / total < min_mass_fraction]
+    
+    if len(large) == 0:
+        # If the graph is so fragmented that NO component passes the threshold,
+        # use the largest available component as the single anchor.
+        largest_idx = np.argmax(counts)
+        large = np.array([unique[largest_idx]])
+        small = np.array([u for u in unique if u != unique[largest_idx]])
+
     if len(small) == 0:
         return labels
     large_centroids = np.array([coords[labels == c].mean(axis=0) for c in large])
@@ -279,42 +287,6 @@ def _validate_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
     total = len(labels)
     _, counts = np.unique(labels, return_counts=True)
     return all(c / total >= min_mass_fraction for c in counts)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stability score
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _compute_stability_score(
-    edge_weights: np.ndarray,
-    coords: np.ndarray,
-    mst: sp.csr_matrix,
-    k_ref: int,
-    min_mass_fraction: float,
-    ratio_range: Tuple[float, float] = (1.5, 6.0),
-    n_steps: int = 25,
-) -> float:
-    """
-    Fraction of ratio_threshold values in ratio_range that produce the same
-    number of macroscopic portions as the reference. Values above 0.7 
-    indicate robust detection.
-    """
-    thresholds = np.linspace(ratio_range[0], ratio_range[1], n_steps)
-    agree = 0
-    n = len(coords)
-    
-    for t in thresholds:
-        # Detect initial k (including debris)
-        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
-        # Build components and merge down to macroscopic structures
-        labels_init = _build_components(mst, k_init, n)
-        labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
-        k_macro = len(np.unique(labels_merged))
-        
-        if k_macro == k_ref:
-            agree += 1
-            
-    return agree / n_steps
 
 
 # ─────────────────────────────────────────────────────────────────────────────
