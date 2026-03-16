@@ -1,15 +1,11 @@
 import numpy as np
 import pandas as pd
 import anndata
-from sklearn.mixture import GaussianMixture
-from sklearn.cluster import AgglomerativeClustering
-from sklearn.neighbors import kneighbors_graph
-from sklearn.metrics import silhouette_score
 from scipy.spatial.distance import cdist
 import itertools
 import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
-from .spatial_portion_detection import find_spatial_portions
+from .hdbscan_spatial_portion_detection import find_spatial_portions_hdbscan as find_spatial_portions
 
 class AlignmentConfig:
     """
