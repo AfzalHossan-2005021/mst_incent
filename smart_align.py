@@ -30,6 +30,7 @@ class AlignmentConfig:
     def __init__(self,
                  w_gene: float = 1.0,
                  w_neighbor: float = 0.5,
+                 emst_quantile: float = 0.98,
                  min_mass_fraction: float = 0.05,
                  min_samples_fraction: float = 0.01,
                  silhouette_threshold: float = 0.1,
@@ -39,6 +40,7 @@ class AlignmentConfig:
                  max_candidates: int = 3):
         self.w_gene = w_gene
         self.w_neighbor = w_neighbor
+        self.emst_quantile = emst_quantile
         self.min_mass_fraction = min_mass_fraction
         self.min_samples_fraction = min_samples_fraction
         self.silhouette_threshold = silhouette_threshold
