@@ -154,18 +154,23 @@ def enforce_spatial_connectivity(coords: np.ndarray, labels: np.ndarray) -> np.n
 
 def detect_hdbscan_portions(
     coords: np.ndarray,
-    config: HDBSCANPortionConfig,
+    config,
 ) -> np.ndarray:
 
     coords = np.asarray(coords, dtype=np.float32)
 
     n_cells = len(coords)
 
-    min_cluster_size = max(10, int(n_cells * config.min_mass_fraction))
-    min_samples = max(5, int(n_cells * config.min_samples_fraction))
+    min_mass_fraction = getattr(config, 'min_mass_fraction', 0.05)
+    min_samples_fraction = getattr(config, 'min_samples_fraction', 0.01)
+    knn_k = getattr(config, 'knn_k', 20)
+    stability_threshold = getattr(config, 'stability_threshold', 0.3)
+
+    min_cluster_size = max(10, int(n_cells * min_mass_fraction))
+    min_samples = max(5, int(n_cells * min_samples_fraction))
 
     # Estimate spatial scale
-    spatial_scale = estimate_spatial_scale(coords, config.knn_k)
+    spatial_scale = estimate_spatial_scale(coords, knn_k)
 
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
@@ -182,7 +187,7 @@ def detect_hdbscan_portions(
 
         probs = clusterer.probabilities_
 
-        unstable = probs < config.stability_threshold
+        unstable = probs < stability_threshold
 
         labels[unstable] = -1
 
