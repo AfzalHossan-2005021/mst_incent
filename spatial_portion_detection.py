@@ -61,8 +61,8 @@ REFERENCES
 
 from __future__ import annotations
 
-import warnings
 import numpy as np
+import pandas as pd
 import anndata
 import scipy.sparse as sp
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
