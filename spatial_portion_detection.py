@@ -244,7 +244,7 @@ def find_spatial_portions_mst(
     adata: anndata.AnnData,
     min_mass_fraction: float = 0.05,
     max_portions: int = 6,
-    ratio_threshold: float = 3.0,
+    ratio_threshold: float = 2.0,
     merge_fragments: bool = True,
     knn_build: int = 15,
     cell_type_key: Optional[str] = 'cell_type_annot',
