@@ -154,14 +154,8 @@ def smart_pairwise_align(sliceA, sliceB, config: AlignmentConfig = None, **kwarg
     if config is None:
         config = AlignmentConfig()
         
-    k_A, labels_A = find_spatial_portions(
-        sliceA, config, cell_type_key='cell_type_annot',
-        community_n_neighbors=15, community_resolution=1.0
-    )
-    k_B, labels_B = find_spatial_portions(
-        sliceB, config, cell_type_key='cell_type_annot',
-        community_n_neighbors=15, community_resolution=1.0
-    )
+    k_A, labels_A = find_spatial_portions(sliceA, config)
+    k_B, labels_B = find_spatial_portions(sliceB, config)
     
     print(f"[Smart Align] Slice A portions: {k_A} | Slice B portions: {k_B}")
     
