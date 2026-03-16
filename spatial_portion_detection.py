@@ -1,42 +1,66 @@
 """
-spatial_portion_detection.py  —  v5 (MST-Silhouette)
+spatial_portion_detection.py
 ────────────────────────────────────────────────────────────────────────────
-MST-based portion detection that is mathematically equivalent to the GMM
-approach while being deterministic, faster, and shape-agnostic.
+Biologically-principled tissue-portion detection for spatial transcriptomics.
 
-WHY THIS IS EQUIVALENT TO GMM
-────────────────────────────────
-GMM detection works in two steps:
-  1. Assign cells to k groups (via Gaussian fitting, random seeds)
-  2. Validate: silhouette_score(coords, labels) > threshold
-               AND every group holds >= min_mass_fraction of cells
+THEORETICAL RATIONALE
+─────────────────────
+Physical tissue sections placed on the same slide but originating from
+distinct anatomical regions (e.g., left/right cerebral hemisphere, four
+cardiac chambers, bilateral kidney lobes) are separated by measurable spatial
+*air gaps* — regions devoid of cells.  Within a continuous tissue region,
+cells are packed at a characteristic density governed by biology (MERFISH
+cell spacing: typically 5–30 µm).
 
-The silhouette score depends ONLY on (coords, labels), not on how labels
-were generated. Therefore: if we generate labels with a different method
-but get the same (or better) labels, the silhouette score is identical.
+The Minimum Spanning Tree (MST) of the spatial point cloud has a key
+structural property that makes it ideal for detecting such gaps:
 
-MST cuts generate labels deterministically:
-  Cut the k-1 largest MST edges → connected components → labels.
+    Theorem (Zahn, 1971): For a point set partitioned into k
+    well-separated clusters, the k-1 longest edges of the Euclidean
+    MST are exactly the edges crossing cluster boundaries.
 
-For well-separated tissue portions, MST cuts produce labels that are
-IDENTICAL to GMM labels (ARI = 1.0, silhouette difference = 0.00000),
-as proven empirically across all tested gap sizes and portion counts.
+This gives us a principled, shape-agnostic, threshold-free framework:
 
-The key fix that makes this work: scan multiple cut positions per k.
-A single bridge cell in the gap can make the exact (k-1)-cut produce
-a component of size 1. Scanning positions k-1, k, k+1, ... finds the
-cut that yields the most balanced and highest-silhouette labeling.
+  1. The MST has exactly (k-1) gap-crossing edges for k tissue portions.
+  2. Gap edges are the largest edges in the MST by construction.
+  3. The transition from gap edges to intra-tissue edges produces a
+     large multiplicative JUMP in sorted MST edge weights.
+  4. We detect this jump via the Maximum Ratio Gap criterion.
 
-ADVANTAGES OVER GMM
+Maximum Ratio Gap Criterion
+───────────────────────────
+Sort all MST edges in descending order: e_1 >= e_2 >= ... >= e_{n-1}.
+
+For each candidate index m in {1, ..., max_k-1}, compute the ratio:
+    ratio[m] = e_m / e_{m+1}
+
+The position m* = argmax(ratio[m]) identifies the transition point.
+If ratio[m*] >= tau (default 3.0), the tissue has k = m*+2 portions.
+If no ratio reaches tau, the tissue is a single portion (k = 1).
+
+Biological interpretation: a gap edge is >= 3x longer than the largest
+intra-tissue MST edge. This corresponds to a physical gap at least 3x
+the typical inter-cell spacing -- conservative enough to avoid splitting
+dense but continuous tissue.
+
+Advantages over GMM
 ────────────────────
-  ✓ Deterministic — no random seeds, reproducible across runs
-  ✓ No shape assumption — works for non-Gaussian tissue morphologies
-  ✓ Faster — O(n log n) MST vs O(n·k·iter) EM per seed
-  ✓ Same output — identical silhouette scores and labels when tissue
-    portions are well-separated (which is the case this code is for)
+  + No shape assumption: works for crescent, lobular, and irregular tissue
+  + Deterministic: no random seed sensitivity (MST is unique for distinct weights)
+  + Threshold is data-derived from the tissue's own geometry
+  + Handles k=1 naturally (no gap -> single portion)
+  - Sensitivity to tau for near-touching tissue (documented in sensitivity_analysis.py)
+
+REFERENCES
+──────────
+  Zahn C.T. (1971) Graph-theoretical methods for detecting and describing
+      Gestalt clusters. IEEE Trans Comput, 20(1), 68-86.
+  Gower J.C. & Ross G.J.S. (1969) Minimum spanning trees and single linkage
+      cluster analysis. Appl Stat, 18(1), 54-64.
 """
 
 from __future__ import annotations
+
 import warnings
 import numpy as np
 import anndata
@@ -44,8 +68,7 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 from scipy.spatial.distance import pdist, squareform
 from sklearn.neighbors import BallTree
-from sklearn.metrics import silhouette_score
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,107 +76,156 @@ from typing import Tuple, Optional
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
-    """Euclidean MST. Exact for n≤5000; BallTree-sparse for n>5000."""
+    """
+    Build the Euclidean Minimum Spanning Tree.
+
+    For n <= 5000 cells: exact O(n^2) pairwise distance matrix.
+    For n >  5000 cells: sparse k-NN graph via BallTree (O(n log n)).
+
+    The sparse approximation is exact for well-separated portions because
+    gap edges are always longer than any k-NN intra-portion edge when the
+    gap exceeds k times the typical inter-cell spacing.
+    """
     n = len(coords)
     if n <= 5_000:
-        D = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
+        dist_sparse = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
     else:
         tree = BallTree(coords, leaf_size=40)
         k = min(knn_build + 1, n)
-        dists, idxs = tree.query(coords, k=k)
+        dists, indices = tree.query(coords, k=k)
         rows = np.repeat(np.arange(n), k)
-        D = sp.csr_matrix((dists.ravel(), (rows, idxs.ravel())), shape=(n, n))
-        D = D + D.T
-    return minimum_spanning_tree(D)
+        dist_sparse = sp.csr_matrix(
+            (dists.ravel(), (rows, indices.ravel())), shape=(n, n)
+        )
+        dist_sparse = dist_sparse + dist_sparse.T
+    return minimum_spanning_tree(dist_sparse)
 
 
-def _merge_to_k(labels: np.ndarray, coords: np.ndarray, target_k: int) -> np.ndarray:
+# ─────────────────────────────────────────────────────────────────────────────
+# K detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _detect_k_from_mst(
+    edge_weights: np.ndarray,
+    max_portions: int = 6,
+    ratio_threshold: float = 3.0,
+    max_edges_to_check: int = 1000,
+) -> int:
     """
-    Merge the smallest components into their nearest larger component
-    until exactly target_k groups remain.
+    Detect number of tissue portions using the Maximum Ratio Gap criterion.
 
-    This handles the case where cutting n_cuts edges produces n_cuts+2
-    components because a single bridge cell becomes its own component.
+    Sorts MST edges descending. Computes ratio[m] = e_m / e_{m+1}.
+    argmax(ratio) identifies the last gap edge. Evaluates deep enough 
+    into the MST to bypass edges linking to single-cell spatial debris.
+
+    Returns initial k (int) which could include debris components. 
+    Returns 1 if no ratio >= ratio_threshold.
+    """
+    sorted_desc = np.sort(edge_weights)[::-1]
+    # Check deeper into the edge list to avoid being masked by stray debris cells
+    n_check = min(max_edges_to_check, len(sorted_desc) - 1)
+    if n_check < 1:
+        return 1
+
+    ratios = sorted_desc[:n_check] / (sorted_desc[1:n_check + 1] + 1e-12)
+    best_m = int(np.argmax(ratios))
+
+    if float(ratios[best_m]) < ratio_threshold:
+        return 1
+
+    # k = (number of gap edges) + 1 = (best_m + 1) + 1
+    return best_m + 2
+
+
+def _build_components(mst: sp.csr_matrix, k: int, n: int) -> np.ndarray:
+    """
+    Remove the k-1 largest MST edges and return connected component labels.
+    """
+    if k <= 1:
+        return np.zeros(n, dtype=int)
+    mst_coo = mst.tocoo()
+    sorted_desc = np.sort(mst_coo.data)[::-1]
+    threshold = float(sorted_desc[k - 1])
+    mask = mst_coo.data <= threshold
+    pruned = sp.csr_matrix(
+        (mst_coo.data[mask], (mst_coo.row[mask], mst_coo.col[mask])),
+        shape=(n, n),
+    )
+    pruned = pruned + pruned.T
+    _, labels = connected_components(pruned, directed=False)
+    return labels.astype(int)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fragment handling
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _merge_small_fragments(
+    labels: np.ndarray,
+    coords: np.ndarray,
+    min_mass_fraction: float,
+) -> np.ndarray:
+    """
+    Merge any component below min_mass_fraction into the spatially nearest
+    large component (nearest centroid). Handles debris cells gracefully.
     """
     labels = labels.copy()
-    while len(np.unique(labels)) > target_k:
-        unique, counts = np.unique(labels, return_counts=True)
-        smallest = unique[np.argmin(counts)]
-        remaining = unique[unique != smallest]
-        centroids = np.array([coords[labels == r].mean(axis=0) for r in remaining])
-        c_s = coords[labels == smallest].mean(axis=0)
-        nearest = remaining[np.argmin(np.linalg.norm(centroids - c_s, axis=1))]
-        labels[labels == smallest] = nearest
+    total = len(labels)
+    unique, counts = np.unique(labels, return_counts=True)
+    large = unique[counts / total >= min_mass_fraction]
+    small = unique[counts / total < min_mass_fraction]
+    if len(small) == 0:
+        return labels
+    large_centroids = np.array([coords[labels == c].mean(axis=0) for c in large])
+    for s in small:
+        centroid_s = coords[labels == s].mean(axis=0)
+        nearest = large[np.argmin(np.linalg.norm(large_centroids - centroid_s, axis=1))]
+        labels[labels == s] = nearest
     for new_i, old_l in enumerate(np.unique(labels)):
         labels[labels == old_l] = new_i
     return labels
 
 
+def _validate_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
+    total = len(labels)
+    _, counts = np.unique(labels, return_counts=True)
+    return all(c / total >= min_mass_fraction for c in counts)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Core detection: MST cuts + silhouette validation
+# Stability score
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _detect_k_mst_silhouette(
+def _compute_stability_score(
+    edge_weights: np.ndarray,
     coords: np.ndarray,
     mst: sp.csr_matrix,
-    max_portions: int = 4,
-    silhouette_threshold: float = 0.35,
-    min_mass_fraction: float = 0.05,
-    max_cuts_scan: int = 15,
-) -> Tuple[int, np.ndarray, float]:
+    k_ref: int,
+    min_mass_fraction: float,
+    ratio_range: Tuple[float, float] = (1.5, 6.0),
+    n_steps: int = 25,
+) -> float:
     """
-    For each candidate k = 2..max_portions, scan multiple MST cut positions
-    and keep the cut yielding the best silhouette score that also passes
-    min_mass_fraction.
-
-    This is the same validation criterion GMM uses, applied to deterministic
-    MST cuts instead of random Gaussian label assignments.
-
-    Parameters
-    ----------
-    max_cuts_scan : How many cut positions to try per k.
-                    Default 15 handles bridge-cell scenarios without
-                    scanning too deeply into intra-tissue edges.
+    Fraction of ratio_threshold values in ratio_range that produce the same
+    number of macroscopic portions as the reference. Values above 0.7 
+    indicate robust detection.
     """
+    thresholds = np.linspace(ratio_range[0], ratio_range[1], n_steps)
+    agree = 0
     n = len(coords)
-    coo = mst.tocoo()
-    ew_s = np.sort(coo.data)[::-1]
-
-    best_k = 1
-    best_labels = np.zeros(n, dtype=int)
-    best_score = -1.0
-
-    for k in range(2, max_portions + 1):
-        # Scan cut positions from k-1 up to max_cuts_scan
-        for n_cuts in range(k - 1, min(max_cuts_scan, len(ew_s) - 1)):
-            threshold = ew_s[n_cuts]
-            mask = coo.data <= threshold
-            pruned = sp.csr_matrix(
-                (coo.data[mask], (coo.row[mask], coo.col[mask])), shape=(n, n)
-            )
-            pruned = pruned + pruned.T
-            n_comp, labels = connected_components(pruned, directed=False)
-
-            # Collapse to exactly k components if bridge cells created extras
-            if n_comp > k:
-                labels = _merge_to_k(labels, coords, k)
-                n_comp = len(np.unique(labels))
-
-            if n_comp != k:
-                continue
-
-            # Identical validation criterion as GMM
-            score = silhouette_score(coords, labels)
-            _, counts = np.unique(labels, return_counts=True)
-            passes_mass = all(c / n >= min_mass_fraction for c in counts)
-
-            if score > silhouette_threshold and passes_mass and score > best_score:
-                best_score  = score
-                best_k      = k
-                best_labels = labels.copy()
-                break  # best cut for this k found; move to next k
-
-    return best_k, best_labels, best_score
+    
+    for t in thresholds:
+        # Detect initial k (including debris)
+        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
+        # Build components and merge down to macroscopic structures
+        labels_init = _build_components(mst, k_init, n)
+        labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
+        k_macro = len(np.unique(labels_merged))
+        
+        if k_macro == k_ref:
+            agree += 1
+            
+    return agree / n_steps
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,15 +233,24 @@ def _detect_k_mst_silhouette(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PortionDetectionResult:
-    def __init__(self, k, labels, silhouette_score, debug_info=None):
-        self.k               = k
-        self.labels          = labels
-        self.silhouette_score = silhouette_score
-        self.debug_info      = debug_info or {}
+    """Result object returned by find_spatial_portions_mst."""
+
+    def __init__(self, k, labels, gap_threshold, top_edge_weights,
+                 top_ratios, stability_score, ratio_threshold_used):
+        self.k = k
+        self.labels = labels
+        self.gap_threshold = gap_threshold
+        self.top_edge_weights = top_edge_weights
+        self.top_ratios = top_ratios
+        self.stability_score = stability_score
+        self.ratio_threshold_used = ratio_threshold_used
 
     def __repr__(self):
-        return (f"PortionDetectionResult(k={self.k}, "
-                f"silhouette={self.silhouette_score:.4f})")
+        return (
+            f"PortionDetectionResult(k={self.k}, "
+            f"gap_threshold={self.gap_threshold:.1f}, "
+            f"stability={self.stability_score:.2f})"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,30 +259,36 @@ class PortionDetectionResult:
 
 def find_spatial_portions_mst(
     adata: anndata.AnnData,
-    max_portions: int = 4,
-    silhouette_threshold: float = 0.1,
     min_mass_fraction: float = 0.05,
-    max_cuts_scan: int = 15,
+    max_portions: int = 6,
+    ratio_threshold: float = 3.0,
+    merge_fragments: bool = True,
     knn_build: int = 15,
-    verbose: bool = False,
 ) -> PortionDetectionResult:
     """
-    Detect physically distinct tissue portions using MST cuts validated
-    by the silhouette score — the same criterion GMM uses.
-
-    This produces identical results to GMM while being deterministic
-    and avoiding Gaussian shape assumptions.
+    Detect physically distinct tissue portions using MST-based gap detection.
 
     Parameters
     ----------
-    adata                : AnnData with .obsm['spatial'] (n × 2).
-    max_portions         : Upper bound on k (default 4, matching original GMM).
-    silhouette_threshold : Minimum silhouette score to accept k>1 (default 0.1).
-    min_mass_fraction    : Each portion must hold >= this fraction (default 0.05).
-    max_cuts_scan        : Cut positions scanned per k (default 15).
-                           Increase if tissue has many bridge/scatter cells.
-    knn_build            : BallTree k for n > 5000 cells (default 15).
-    verbose              : Print diagnostics (default False).
+    adata             : AnnData with .obsm['spatial'] (n x 2 coordinates).
+    min_mass_fraction : Minimum fraction of total cells per valid portion.
+                        Smaller fragments are merged into the nearest portion.
+                        Default 0.05 (5%).
+    max_portions      : Biological upper bound on k. Default 6.
+    ratio_threshold   : Minimum edge-weight ratio to declare a gap.
+                        tau=3.0: gap must be >= 3x the next intra-tissue edge.
+                        Increase for near-touching tissue; decrease for sparse.
+    merge_fragments   : If True, merge sub-threshold fragments (recommended).
+    knn_build         : k for BallTree approximation when n > 5000 cells.
+
+    Returns
+    -------
+    PortionDetectionResult with attributes:
+        .k               -- number of detected tissue portions (int)
+        .labels          -- per-cell component index array (shape n,)
+        .gap_threshold   -- gap edge threshold in coordinate units
+        .top_ratios      -- ratio array for the top max_portions MST edges
+        .stability_score -- robustness score in [0, 1]; >0.7 = reliable
     """
     coords = np.asarray(adata.obsm['spatial'], dtype=np.float64)
     n = len(coords)
@@ -209,24 +296,56 @@ def find_spatial_portions_mst(
         raise ValueError(f"Slice has only {n} cells.")
 
     mst = _build_mst(coords, knn_build=knn_build)
+    mst_coo = mst.tocoo()
+    edge_weights = mst_coo.data.copy()
 
-    k, labels, score = _detect_k_mst_silhouette(
-        coords, mst,
-        max_portions=max_portions,
-        silhouette_threshold=silhouette_threshold,
-        min_mass_fraction=min_mass_fraction,
-        max_cuts_scan=max_cuts_scan,
+    if len(edge_weights) == 0:
+        return PortionDetectionResult(
+            k=1, labels=np.zeros(n, dtype=int), gap_threshold=0.0,
+            top_edge_weights=np.array([]), top_ratios=np.array([]),
+            stability_score=1.0, ratio_threshold_used=ratio_threshold,
+        )
+
+    sorted_desc = np.sort(edge_weights)[::-1]
+    n_top = min(max_portions, len(sorted_desc) - 1)
+    top_weights = sorted_desc[:n_top + 1]
+    top_ratios = top_weights[:-1] / (top_weights[1:] + 1e-12)
+
+    k_init = _detect_k_from_mst(edge_weights, ratio_threshold=ratio_threshold)
+    labels = _build_components(mst, k_init, n)
+
+    if merge_fragments:
+        labels = _merge_small_fragments(labels, coords, min_mass_fraction)
+    elif not _validate_portions(labels, min_mass_fraction):
+        raise ValueError(
+            "Detected portions include fragments below min_mass_fraction. "
+            "Set merge_fragments=True or increase ratio_threshold."
+        )
+
+    k = len(np.unique(labels))
+    stability = _compute_stability_score(
+        edge_weights, coords, mst, k, min_mass_fraction
     )
+    gap_threshold = float(sorted_desc[k_init - 1]) if k_init >= 2 else float('inf')
 
-    if verbose:
-        print(f"  [MST-sil] k={k}  silhouette={score:.4f}  "
-              f"portions={np.unique(labels, return_counts=True)[1].tolist()}")
+    if k > max_portions:
+        warnings.warn(
+            f"Detected {k} macroscopic portions, which exceeds max_portions ({max_portions}).",
+            UserWarning,
+        )
+
+    if stability < 0.4:
+        warnings.warn(
+            f"Low stability score ({stability:.2f}) for k={k}. "
+            "Consider adjusting ratio_threshold or inspecting the slide.",
+            UserWarning,
+        )
 
     return PortionDetectionResult(
-        k=k, labels=labels, silhouette_score=score,
-        debug_info={'max_portions': max_portions,
-                    'silhouette_threshold': silhouette_threshold,
-                    'min_mass_fraction': min_mass_fraction}
+        k=k, labels=labels, gap_threshold=gap_threshold,
+        top_edge_weights=top_weights, top_ratios=top_ratios,
+        stability_score=stability,
+        ratio_threshold_used=ratio_threshold,
     )
 
 
@@ -236,20 +355,26 @@ def find_spatial_portions(
     max_portions: int = 4,
 ) -> Tuple[int, np.ndarray]:
     """
-    Drop-in replacement for find_spatial_portions in smart_align.py.
+    Drop-in replacement for the GMM-based find_spatial_portions in smart_align.py.
 
-    Uses MST cuts with silhouette validation — equivalent to GMM but
-    deterministic and shape-agnostic.
+    The AlignmentConfig.silhouette_threshold parameter has no equivalent here
+    and is intentionally ignored -- geometric separation is now measured
+    directly via the ratio criterion, not as a post-hoc silhouette proxy.
 
-    Parameters mirror the original GMM implementation:
-      config.silhouette_threshold  → silhouette acceptance gate
-      config.min_mass_fraction     → minimum portion size gate
+    Parameters
+    ----------
+    adata        : AnnData with .obsm['spatial'].
+    config       : AlignmentConfig. Uses .min_mass_fraction.
+    max_portions : Upper bound on k.
+
+    Returns
+    -------
+    (k, labels) -- same as the original GMM-based function.
     """
     result = find_spatial_portions_mst(
         adata,
-        max_portions=max_portions,
-        silhouette_threshold=getattr(config, 'silhouette_threshold', 0.35),
         min_mass_fraction=config.min_mass_fraction,
-        verbose=True,
+        max_portions=max_portions,
+        merge_fragments=True,
     )
     return result.k, result.labels
