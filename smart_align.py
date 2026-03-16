@@ -7,6 +7,7 @@ from sklearn.neighbors import kneighbors_graph
 from sklearn.metrics import silhouette_score
 from scipy.spatial.distance import cdist
 import itertools
+import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
 from .spatial_portion_detection import find_spatial_portions
 
@@ -143,6 +144,32 @@ def get_hausdorff_disparity(coords_A, coords_B, percentile=95, allow_reflection=
     return max(h1, h2)
 
 
+def _visualize_portions_inline(adata, labels, title):
+    """
+    Inline utility to plot spatial portions discovered during the Smart Align phase.
+    """
+    coords = adata.obsm['spatial']
+    x, y = coords[:, 0], coords[:, 1]
+    
+    unique_labels = np.unique(labels)
+    cmap = plt.get_cmap('tab10' if len(unique_labels) <= 10 else 'tab20')
+    
+    plt.figure(figsize=(6, 6))
+    for i, lbl in enumerate(unique_labels):
+        mask = labels == lbl
+        plt.scatter(x[mask], y[mask], label=f'Portion {lbl}', 
+                    color=cmap(i % cmap.N), s=10, alpha=0.9, edgecolors='none')
+        
+    plt.title(title)
+    plt.xlabel('Spatial X')
+    plt.ylabel('Spatial Y')
+    plt.gca().set_aspect('equal', 'datalim')
+    plt.gca().invert_yaxis()
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+
+
 def smart_pairwise_align(sliceA, sliceB, config: AlignmentConfig = None, **kwargs):
     """
     Automatically detects varying numbers of structural portions (e.g., matching a 1-portion slice 
@@ -153,11 +180,18 @@ def smart_pairwise_align(sliceA, sliceB, config: AlignmentConfig = None, **kwarg
     # 1. Detect structures dynamically based on spatial density
     if config is None:
         config = AlignmentConfig()
-        
+    
+    # Import the powerful MST-based structural detection we just built
+    from .spatial_portion_detection import find_spatial_portions
     k_A, labels_A = find_spatial_portions(sliceA, config)
     k_B, labels_B = find_spatial_portions(sliceB, config)
     
     print(f"[Smart Align] Slice A portions: {k_A} | Slice B portions: {k_B}")
+    
+    # --- VISUALIZATION INJECTION ---
+    _visualize_portions_inline(sliceA, labels_A, f"Slice A Structural Portions (k={k_A})")
+    _visualize_portions_inline(sliceB, labels_B, f"Slice B Structural Portions (k={k_B})")
+    # -------------------------------
     
     original_return_obj = kwargs.get('return_obj', False)
     kwargs['return_obj'] = True
