@@ -1,35 +1,36 @@
 """
 spatial_portion_detection.py
 ────────────────────────────────────────────────────────────────────────────
-Biologically-principled tissue-portion detection for spatial transcriptomics.
+Biologically‑principled tissue‑portion detection for spatial transcriptomics.
 
-THREE-DETECTOR CASCADED ENSEMBLE
-─────────────────────────────────
+THREE‑DETECTOR CASCADED ENSEMBLE + COMMUNITY FALLBACK
+──────────────────────────────────────────────────────
 Physical tissue sections on the same slide are separated by air gaps. No
 single geometric detector is universally robust because real MERFISH/Xenium
 data has varying gap widths, tissue densities, and edge bleed. Three
 complementary detectors are run in cascade, stopping as soon as one succeeds.
+If all gap‑based detectors return k=1 but cell‑type information is available,
+a fourth detector (community detection on a cell‑type‑weighted spatial graph)
+is invoked. This handles cases where tissue portions touch but are
+compositionally distinct.
 
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  1. MST Dual Criterion   — primary (fast, exact for clean gaps)          │
 │  2. KDE Valley Detection — secondary (robust to sparse bridge cells)     │
-│  3. GMM + Gap Validation — fallback (shape-aware, validated spatially)   │
+│  3. GMM + Gap Validation — fallback (shape‑aware, validated spatially)   │
+│  4. Community Detection  — cell‑type‑aware (when gaps absent)            │
 └──────────────────────────────────────────────────────────────────────────┘
 
 DETECTOR 1 — MST Dual Criterion
 ────────────────────────────────
-Zahn (1971): for k tissue portions, the MST has exactly k-1 gap-crossing
-edges, which are the k-1 largest MST edges. We require TWO conditions to
-declare a gap at the k-1 / k boundary position:
+Zahn (1971): for k tissue portions, the MST has exactly k‑1 gap‑crossing
+edges, which are the k‑1 largest MST edges. We require TWO conditions to
+declare a gap at the k‑1 / k boundary position:
 
-  (a) Ratio test:   e[k-2] / e[k-1] >= tau_ratio   (relative jump)
-  (b) Z-score test: z_score(e[k-2]) >= tau_z        (statistical outlier)
+  (a) Ratio test:   e[k‑2] / e[k‑1] >= tau_ratio   (relative jump)
+  (b) Z‑score test: z_score(e[k‑2]) >= tau_z        (statistical outlier)
 
-Calibration from synthetic experiments:
-  Single tissue (any shape): max ratio ≤ 1.35, max z ≤ 5.0
-  Two portions, gap ≥ 0.3×R: min ratio ≥ 2.5,  min z ≥ 11.0
-
-Defaults: tau_ratio=2.0, tau_z=6.0 → near-zero false positive rate.
+Defaults: tau_ratio=2.0, tau_z=6.0 → near‑zero false positive rate.
 
 DETECTOR 2 — KDE Valley Detection
 ────────────────────────────────────
@@ -40,40 +41,52 @@ bridge cells that break the MST gap chain.
 
 DETECTOR 3 — GMM + Spatial Gap Validation
 ──────────────────────────────────────────
-GMM (original smart_align approach) used as a last resort. After GMM assigns
-k clusters, a spatial gap is validated:
+GMM used as a last resort. After GMM assigns k clusters, a spatial gap is
+validated:
 
   min_between_cluster_dist / median_intra_cluster_nn >= gap_ratio_min
 
 Calibration: single tissue (elongated) max gap_ratio ≤ 2.14,
              two portions (gap ≥ 0.3×R) min gap_ratio ≥ 8.1.
 
-Default gap_ratio_min=3.0 completely separates these populations, preventing
-GMM false positives on elongated or concave single-tissue shapes.
+Default gap_ratio_min=3.0 prevents GMM false positives on elongated or
+concave single‑tissue shapes.
+
+DETECTOR 4 — Community Detection (cell‑type‑aware)
+──────────────────────────────────────────────────
+When no physical gap is detected, we build a spatial k‑nearest neighbour
+graph and weight edges by the product of spatial proximity (Gaussian kernel)
+and cell‑type agreement (1 if same type, 0 otherwise). Leiden community
+detection (modularity) then partitions the graph into regions of homogeneous
+cell type. This succeeds even when portions touch but have distinct
+compositions.
 
 REFERENCES
 ──────────
-  Zahn C.T. (1971) Graph-theoretical methods for detecting Gestalt clusters.
+  Zahn C.T. (1971) Graph‑theoretical methods for detecting Gestalt clusters.
       IEEE Trans Comput, 20(1), 68-86.
   Silverman B.W. (1986) Density Estimation for Statistics and Data Analysis.
+  Traag V.A. et al. (2019) From Louvain to Leiden: guaranteeing well‑connected
+      communities. Sci Rep, 9(1), 5233.
 """
 
 from __future__ import annotations
 
-import math
 import warnings
 import numpy as np
+import pandas as pd
 import anndata
 import scipy.sparse as sp
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import gaussian_kde
 from scipy.spatial import cKDTree
-from sklearn.neighbors import BallTree
+from sklearn.neighbors import BallTree, kneighbors_graph
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Any, List
+import igraph as ig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +94,7 @@ from typing import Tuple, Optional, Dict
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
-    """Build Euclidean MST. Exact for n≤5000; BallTree-sparse for n>5000."""
+    """Build Euclidean MST. Exact for n≤5000; BallTree‑sparse for n>5000."""
     n = len(coords)
     if n <= 5_000:
         dist_sparse = sp.csr_matrix(squareform(pdist(coords, metric='euclidean')))
@@ -98,7 +111,7 @@ def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
 
 
 def _build_components(mst: sp.csr_matrix, k: int, n: int) -> np.ndarray:
-    """Remove k-1 largest MST edges → connected component labels."""
+    """Remove k‑1 largest MST edges → connected component labels."""
     if k <= 1:
         return np.zeros(n, dtype=int)
     mst_coo = mst.tocoo()
@@ -160,7 +173,7 @@ def _detect_k_kde(
 ) -> Tuple[int, np.ndarray]:
     """
     KDE valley detection along PCA axis 1 (maximum variance direction).
-    Returns (k, per-cell labels).
+    Returns (k, per‑cell labels).
     """
     n = len(coords)
     if n < 10:
@@ -211,7 +224,7 @@ def _spatial_gap_ratio(coords: np.ndarray, labels: np.ndarray) -> float:
     if len(unique) < 2:
         return 0.0
 
-    # Median nearest-neighbour distance within clusters (characteristic cell spacing)
+    # Median nearest‑neighbour distance within clusters (characteristic cell spacing)
     intra_nns = []
     cluster_pts = {}
     for lbl in unique:
@@ -246,7 +259,7 @@ def _detect_k_gmm_validated(
     """
     GMM detection with mandatory spatial gap validation.
     A k>1 result is only accepted if the spatial gap ratio >= gap_ratio_min,
-    preventing false positives on elongated or concave single-tissue shapes.
+    preventing false positives on elongated or concave single‑tissue shapes.
     """
     total = len(coords)
     best_k, best_labels, best_score = 1, np.zeros(total, dtype=int), -1
@@ -275,6 +288,51 @@ def _detect_k_gmm_validated(
                 best_labels = label_list[int(np.argmax(scores))]
 
     return best_k, best_labels
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detector 4: Community Detection (cell‑type‑aware)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _detect_k_community(
+    adata: anndata.AnnData,
+    cell_type_key: str,
+    n_neighbors: int = 15,
+    resolution: float = 1.0,
+    min_mass_fraction: float = 0.05,
+) -> Tuple[int, np.ndarray]:
+    """
+    Community detection on a spatial k‑NN graph weighted by cell‑type similarity.
+    Returns (k, labels).
+    """
+    coords = adata.obsm['spatial']
+    n = len(coords)
+
+    # 1. Spatial k‑NN graph (undirected)
+    knn = kneighbors_graph(coords, n_neighbors=n_neighbors, mode='distance', include_self=False)
+    knn = (knn + knn.T).tocoo()
+    rows, cols, dists = knn.row, knn.col, knn.data
+
+    # 2. Cell type codes
+    codes, _ = pd.factorize(adata.obs[cell_type_key])
+    same_type = (codes[rows] == codes[cols]).astype(float)
+
+    # 3. Affinity: product of spatial proximity (Gaussian kernel) and cell‑type agreement
+    sigma = np.median(dists) if len(dists) > 0 else 1.0
+    spatial_aff = np.exp(- (dists ** 2) / (2 * sigma ** 2))
+    affinity = spatial_aff * same_type   # strong only if both close and same cell type
+
+    # 4. Build graph and run Leiden
+    g = ig.Graph(n=n, edges=list(zip(rows, cols)), edge_attrs={'weight': affinity})
+    partition = g.community_leiden(objective_function='modularity',
+                                   weights='weight',
+                                   resolution_parameter=resolution)
+    labels = np.array(partition.membership, dtype=int)
+
+    # 5. Merge tiny fragments
+    labels = _merge_small_fragments(labels, coords, min_mass_fraction)
+    k = len(np.unique(labels))
+    return k, labels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +367,7 @@ def _validate_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stability score
+# Stability score (for MST)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_stability_score(
@@ -361,6 +419,9 @@ def find_spatial_portions_mst(
     valley_threshold: float = 0.20,
     silhouette_threshold: float = 0.35,
     gap_ratio_min: float = 3.0,
+    cell_type_key: Optional[str] = None,
+    community_n_neighbors: int = 15,
+    community_resolution: float = 1.0,
     use_gmm_fallback: bool = True,
     merge_fragments: bool = True,
     knn_build: int = 15,
@@ -368,7 +429,7 @@ def find_spatial_portions_mst(
 ) -> PortionDetectionResult:
     """
     Detect physically distinct tissue portions using a cascaded ensemble:
-    MST Dual → KDE Valley → GMM + Gap Validation.
+    MST Dual → KDE Valley → (if cell_type_key given) Community Detection → GMM + Gap Validation.
 
     Parameters
     ----------
@@ -376,18 +437,18 @@ def find_spatial_portions_mst(
     min_mass_fraction   : Minimum cell fraction per valid portion (default 0.05).
     max_portions        : Biological upper bound on k (default 6).
     tau_ratio           : MST boundary ratio threshold (default 2.0).
-                          Handles gaps as tight as 0.3× tissue radius.
-    tau_z               : MST z-score threshold (default 6.0).
-                          6 SDs above intra-tissue edge distribution.
+    tau_z               : MST z‑score threshold (default 6.0).
     valley_threshold    : KDE valley depth threshold (default 0.20).
-                          Valley must be <20% of peak density.
     silhouette_threshold: GMM acceptance threshold (default 0.35).
     gap_ratio_min       : Spatial gap validation threshold for GMM (default 3.0).
-                          Prevents GMM false positives on elongated tissue.
+    cell_type_key       : Key in adata.obs for cell type labels. If provided,
+                          community detection is attempted when gap detectors fail.
+    community_n_neighbors : Number of neighbours for community detection graph.
+    community_resolution : Resolution parameter for Leiden algorithm.
     use_gmm_fallback    : If False, skip GMM (faster, more conservative).
-    merge_fragments     : Merge sub-threshold debris fragments (default True).
+    merge_fragments     : Merge sub‑threshold debris fragments (default True).
     knn_build           : k for BallTree sparse MST (n > 5000 case).
-    verbose             : Print per-detector diagnostics.
+    verbose             : Print per‑detector diagnostics.
 
     Returns
     -------
@@ -411,8 +472,15 @@ def find_spatial_portions_mst(
     stability = _compute_stability_score(edge_weights, k_mst, max_portions)
     gap_threshold = float(sorted_desc[k_mst - 1]) if k_mst >= 2 else float('inf')
 
-    debug_info = {'top_ratios': top_ratios, 'boundary_ratio': best_ratio,
-                  'boundary_z': best_z, 'mst_k': k_mst}
+    debug_info: Dict[str, Any] = {
+        'top_ratios': top_ratios,
+        'boundary_ratio': best_ratio,
+        'boundary_z': best_z,
+        'mst_k': k_mst,
+        'kde_k': None,
+        'gmm_k': None,
+        'community_k': None
+    }
 
     if verbose:
         print(f"  [Detector 1: MST dual]  k={k_mst}  "
@@ -425,7 +493,7 @@ def find_spatial_portions_mst(
         k_mst = len(np.unique(labels))
         return PortionDetectionResult(
             k=k_mst, labels=labels, detector_used='mst_dual',
-            k_per_detector={'mst': k_mst, 'kde': None, 'gmm': None},
+            k_per_detector={'mst': k_mst, 'kde': None, 'gmm': None, 'community': None},
             gap_threshold=gap_threshold, stability_score=stability,
             debug_info=debug_info,
         )
@@ -446,10 +514,32 @@ def find_spatial_portions_mst(
     if k_kde > 1:
         return PortionDetectionResult(
             k=k_kde, labels=labels_kde, detector_used='kde',
-            k_per_detector={'mst': k_mst, 'kde': k_kde, 'gmm': None},
+            k_per_detector={'mst': k_mst, 'kde': k_kde, 'gmm': None, 'community': None},
             gap_threshold=float('nan'), stability_score=stability,
             debug_info=debug_info,
         )
+
+    # ── Detector 4 (optional): Community Detection (cell‑type‑aware) ────
+    if cell_type_key is not None and cell_type_key in adata.obs:
+        k_comm, labels_comm = _detect_k_community(
+            adata,
+            cell_type_key=cell_type_key,
+            n_neighbors=community_n_neighbors,
+            resolution=community_resolution,
+            min_mass_fraction=min_mass_fraction
+        )
+        debug_info['community_k'] = k_comm
+        if verbose:
+            print(f"  [Detector 4: community] k={k_comm}  "
+                  f"n_neighbors={community_n_neighbors}  resolution={community_resolution}")
+
+        if k_comm > 1:
+            return PortionDetectionResult(
+                k=k_comm, labels=labels_comm, detector_used='community',
+                k_per_detector={'mst': k_mst, 'kde': k_kde, 'gmm': None, 'community': k_comm},
+                gap_threshold=float('nan'), stability_score=stability,
+                debug_info=debug_info,
+            )
 
     # ── Detector 3: GMM + Spatial Gap Validation ─────────────────────────
     if use_gmm_fallback:
@@ -470,7 +560,7 @@ def find_spatial_portions_mst(
                 k_gmm = len(np.unique(labels_gmm))
             return PortionDetectionResult(
                 k=k_gmm, labels=labels_gmm, detector_used='gmm',
-                k_per_detector={'mst': k_mst, 'kde': k_kde, 'gmm': k_gmm},
+                k_per_detector={'mst': k_mst, 'kde': k_kde, 'gmm': k_gmm, 'community': debug_info['community_k']},
                 gap_threshold=float('nan'), stability_score=stability,
                 debug_info=debug_info,
             )
@@ -485,7 +575,8 @@ def find_spatial_portions_mst(
         k=1, labels=np.zeros(n, dtype=int),
         detector_used='unanimous_k1',
         k_per_detector={'mst': k_mst, 'kde': k_kde,
-                        'gmm': debug_info.get('gmm_k')},
+                        'gmm': debug_info.get('gmm_k'),
+                        'community': debug_info.get('community_k')},
         gap_threshold=float('inf'), stability_score=stability,
         debug_info=debug_info,
     )
@@ -495,21 +586,26 @@ def find_spatial_portions(
     adata: anndata.AnnData,
     config,
     max_portions: int = 4,
+    cell_type_key: Optional[str] = None,
+    **kwargs,
 ) -> Tuple[int, np.ndarray]:
     """
-    Drop-in replacement for find_spatial_portions in smart_align.py.
+    Drop‑in replacement for find_spatial_portions in smart_align.py.
 
-    Runs the full cascade (MST dual → KDE valley → GMM + gap validation).
-    Prints per-detector diagnostics via verbose=True.
+    Runs the full cascade (MST dual → KDE valley → (optional) community → GMM + gap validation).
+    Prints per‑detector diagnostics via verbose=True.
+    Additional kwargs are passed to find_spatial_portions_mst.
     """
     result = find_spatial_portions_mst(
         adata,
         min_mass_fraction=config.min_mass_fraction,
         max_portions=max_portions,
         silhouette_threshold=getattr(config, 'silhouette_threshold', 0.35),
+        cell_type_key=cell_type_key,
         use_gmm_fallback=True,
         merge_fragments=True,
         verbose=True,
+        **kwargs,
     )
     print(f"  → Ensemble: k={result.k} via '{result.detector_used}'  "
           f"all detectors={result.k_per_detector}")
