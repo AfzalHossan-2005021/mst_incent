@@ -168,11 +168,14 @@ def _detect_stable_k(
     sorted_desc = np.sort(edge_weights)[::-1]
     
     # We evaluate all physical connections strictly larger than the dense tissue standard
-    intra_tissue_bound = np.percentile(edge_weights, 99)
+    # Lower bound to 90th percentile (top 10%) to allow pushing past heavily scattered debris
+    intra_tissue_bound = np.percentile(edge_weights, 90)
     n_check = np.sum(sorted_desc > intra_tissue_bound)
     
     # Ensure minimum checks to allow enough graph fractures to separate max_portions
-    n_check = max(max_portions + 10, n_check)
+    # Guarantee sweeping up to 500 edges to bypass intense debris halos, because 
+    # breaking 1 edge on a debris floater just creates a 1-cell component that gets re-merged.
+    n_check = max(500, n_check)
     n_check = min(n_check, len(sorted_desc) - 1)
     
     best_k = 1
