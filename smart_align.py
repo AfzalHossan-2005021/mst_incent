@@ -17,6 +17,8 @@ class AlignmentConfig:
         w_neighbor: Weight of the neighborhood spatial cost in final scoring.
         min_mass_fraction: Minimum proportion of total cells required for a cluster 
                            to be considered a macro-structure rather than debris.
+        min_samples_fraction: Minimum proportion of total cells required for a cluster 
+                              to be considered a macro-structure rather than debris.
         silhouette_threshold: Minimum ratio of intra-cluster to inter-cluster distance 
                               required to consider a tissue fragment anatomically disjoint.
         allow_reflection: If true, allows Z-axis mirror reflections in rigid alignment.
@@ -29,6 +31,7 @@ class AlignmentConfig:
                  w_gene: float = 1.0,
                  w_neighbor: float = 0.5,
                  min_mass_fraction: float = 0.05,
+                 min_samples_fraction: float = 0.01,
                  silhouette_threshold: float = 0.1,
                  allow_reflection: bool = False,
                  allow_scale: bool = True,
@@ -37,6 +40,7 @@ class AlignmentConfig:
         self.w_gene = w_gene
         self.w_neighbor = w_neighbor
         self.min_mass_fraction = min_mass_fraction
+        self.min_samples_fraction = min_samples_fraction
         self.silhouette_threshold = silhouette_threshold
         self.allow_reflection = allow_reflection
         self.allow_scale = allow_scale
