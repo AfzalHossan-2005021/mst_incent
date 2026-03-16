@@ -107,30 +107,37 @@ def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
 
 def _detect_k_from_mst(
     edge_weights: np.ndarray,
-    n_cells: int,
-    min_mass_fraction: float,
     ratio_threshold: float = 3.0,
 ) -> int:
     """
     Detect number of tissue portions using the Maximum Ratio Gap criterion.
 
-    Sorts MST edges descending. Computes ratio[m] = e_m / e_{m+1}.
-    argmax(ratio) identifies the last gap edge. 
+    BIOLOGICAL GROUNDING:
+    A continuous tissue structure is defined by its cellular packing density 
+    (the inter-nuclear distances, typically bounded by cell size + ECM).
+    Instead of calculating a statistical number of edges to check, we establish 
+    the search space using the physical cellular spacing of the tissue itself. 
     
-    The search depth is biologically grounded by `min_mass_fraction`:
-    If a true anatomical portion must hold at least X% of cells, then up to 
-    X% of cells could theoretically exist as scattered single-cell debris. 
-    We traverse up to this dynamic limit to guarantee bypassing debris.
-
-    Returns initial k (int) which could include debris components. 
-    Returns 1 if no ratio >= ratio_threshold.
+    The 99th percentile of the full MST smoothly captures the physical upper 
+    bound of continuous intra-tissue lengths (perfectly incorporating natural 
+    sparsity, micro-tears, or internal blood vessels).
+    Any edges significantly larger than this threshold represent "empty slide" 
+    spaces (whether anatomical gaps or random floating debris). We evaluate 
+    ratios across this entire sparse physical manifold until we securely touch 
+    back into the dense structural manifold.
     """
     sorted_desc = np.sort(edge_weights)[::-1]
     
-    # Biologically grounded search depth based on minimum mass constraints
-    dynamic_max_edges = max(10, int(n_cells * min_mass_fraction))
-    n_check = min(dynamic_max_edges, len(sorted_desc) - 1)
+    # Identify the physical upper length bound of intrinsic tissue continuity
+    intra_tissue_bound = np.percentile(edge_weights, 99)
     
+    # Evaluate all physical "empty space" gaps crossing larger than standard spacing
+    n_check = np.sum(sorted_desc > intra_tissue_bound)
+    
+    # Ensure minimum sanity check on extremely microscopic tissue patches
+    n_check = max(5, n_check)
+    n_check = min(n_check, len(sorted_desc) - 1)
+
     if n_check < 1:
         return 1
 
@@ -140,7 +147,6 @@ def _detect_k_from_mst(
     if float(ratios[best_m]) < ratio_threshold:
         return 1
 
-    # k = (number of gap edges) + 1 = (best_m + 1) + 1
     return best_m + 2
 
 
@@ -223,7 +229,7 @@ def _compute_stability_score(
     
     for t in thresholds:
         # Detect initial k (including debris)
-        k_init = _detect_k_from_mst(edge_weights, n, min_mass_fraction, ratio_threshold=t)
+        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
         # Build components and merge down to macroscopic structures
         labels_init = _build_components(mst, k_init, n)
         labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
@@ -318,7 +324,7 @@ def find_spatial_portions_mst(
     top_weights = sorted_desc[:n_top + 1]
     top_ratios = top_weights[:-1] / (top_weights[1:] + 1e-12)
 
-    k_init = _detect_k_from_mst(edge_weights, n, min_mass_fraction, ratio_threshold=ratio_threshold)
+    k_init = _detect_k_from_mst(edge_weights, ratio_threshold=ratio_threshold)
     labels = _build_components(mst, k_init, n)
 
     if merge_fragments:
