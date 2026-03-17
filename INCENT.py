@@ -156,8 +156,8 @@ def pairwise_align(
     if isinstance(nx,ot.backend.TorchBackend):
         coordinatesA = coordinatesA.float()
         coordinatesB = coordinatesB.float()
-    D_A = compute_geodesic_cost_matrix(coordinatesA)
-    D_B = compute_geodesic_cost_matrix(coordinatesB)
+    D_A = ot.dist(coordinatesA, coordinatesA, metric='euclidean')
+    D_B = ot.dist(coordinatesB, coordinatesB, metric='euclidean')
 
     # --- CRITICAL GEOMETRIC SCALING ---
     # To achieve perfect structural alignment regardless of slices being from different 
