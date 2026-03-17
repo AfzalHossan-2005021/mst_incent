@@ -32,7 +32,7 @@ class AlignmentConfig:
                  emst_quantile: float = 0.98,
                  min_mass_fraction: float = 0.05,
                  min_samples_fraction: float = 0.01,
-                 silhouette_threshold: float = 0.3,
+                 silhouette_threshold: float = 0.4,
                  allow_reflection: bool = False,
                  allow_scale: bool = True,
                  clustering_method: str = 'gmm',
