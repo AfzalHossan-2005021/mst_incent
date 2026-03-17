@@ -6,6 +6,8 @@ from anndata import AnnData
 import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
 
+from .hdbscan_spatial_portion_detection import find_spatial_portions_hdbscan as find_spatial_portions
+
 class AlignmentConfig:
     """
     Configuration parameters for spatial alignment.
@@ -169,65 +171,6 @@ def _visualize_portions_inline(adata, labels, title):
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.show()
-
-
-def validate_strictly_structural_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
-    """
-    Validates that each GMM-detected portion holds at least min_mass_fraction
-    of total cells — rejecting debris fragments and experimental artifacts.
-    """
-    total_cells = len(labels)
-    unique_labels, counts = np.unique(labels, return_counts=True)
-    for count in counts:
-        if (count / total_cells) < min_mass_fraction:
-            return False
-    return True
-
-
-def find_spatial_portions(adata: AnnData, config: AlignmentConfig, max_portions: int = 4) -> tuple[int, np.ndarray]:
-    """
-    Detects the number of physical tissue portions using GMM spatial clustering.
-    Uses silhouette score and minimum mass fraction to validate genuine structures.
-    Original implementation — retained because GMM's global centroid-separation
-    signal reliably handles real MERFISH tissue geometry better than MST-based
-    approaches when tissue portions are large relative to gap width.
-    """
-    from sklearn.mixture import GaussianMixture
-    from sklearn.metrics import silhouette_score
-
-    coords = adata.obsm['spatial']
-    best_k = 1
-    best_labels = np.zeros(len(coords), dtype=int)
-    best_score = -1
-
-    for k in range(2, max_portions + 1):
-        scores = []
-        label_inits = []
-
-        for seed in range(5):
-            gmm = GaussianMixture(
-                n_components=k,
-                random_state=seed,
-                covariance_type='full',
-                n_init=3
-            )
-            labels = gmm.fit_predict(coords)
-            score = silhouette_score(coords, labels)
-
-            if (score > config.silhouette_threshold and
-                    validate_strictly_structural_portions(labels, config.min_mass_fraction)):
-                scores.append(score)
-                label_inits.append(labels)
-
-        # Require consensus across at least 3 of the 5 seeds
-        if len(scores) >= 3:
-            avg_score = np.mean(scores)
-            if avg_score > best_score:
-                best_score = avg_score
-                best_k = k
-                best_labels = label_inits[np.argmax(scores)]
-
-    return best_k, best_labels
 
 
 def smart_pairwise_align(sliceA, sliceB, config: AlignmentConfig = None, **kwargs):
