@@ -108,7 +108,7 @@ def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
 def _detect_k_from_mst(
     edge_weights: np.ndarray,
     max_portions: int = 6,
-    ratio_threshold: float = 0.01,
+    ratio_threshold: float = 3.0,
 ) -> int:
     """
     Detect number of tissue portions using the Maximum Ratio Gap criterion.
@@ -244,7 +244,7 @@ def find_spatial_portions_mst(
     adata: anndata.AnnData,
     min_mass_fraction: float = 0.05,
     max_portions: int = 6,
-    ratio_threshold: float = 3.0,
+    ratio_threshold: float = 1.0,
     merge_fragments: bool = True,
     knn_build: int = 15,
 ) -> PortionDetectionResult:
