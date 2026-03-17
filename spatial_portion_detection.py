@@ -400,16 +400,21 @@ def find_spatial_portions_mst(
 
 def find_spatial_portions(
     adata: anndata.AnnData,
-    config,
+    config=None,
     max_portions: int = 4,
 ) -> Tuple[int, np.ndarray]:
     """
     Drop-in replacement for the GMM-based find_spatial_portions in smart_align.py.
     """
+    if config is None:
+        min_mass_fraction = 0.05
+    else:
+        min_mass_fraction = getattr(config, 'min_mass_fraction', 0.05)
+
     result = find_spatial_portions_mst(
         adata,
-        min_mass_fraction=config.min_mass_fraction,
-        max_portions=max_portions,
+        min_mass_fraction=float(min_mass_fraction),
+        max_portions=int(max_portions),
         merge_fragments=True,
     )
     
