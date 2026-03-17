@@ -29,7 +29,7 @@ def pairwise_align(
     b_distribution = None, 
     norm: bool = False, 
     numItermax: int = 6000, 
-    backend = ot.backend.NumpyBackend(), 
+    backend = ot.backend.TorchBackend(), 
     use_gpu: bool = False, 
     return_obj: bool = False,
     verbose: bool = False, 
@@ -102,24 +102,19 @@ def pairwise_align(
     
     # Determine if gpu or cpu is being used
     if use_gpu:
-        if isinstance(backend,ot.backend.TorchBackend):
-            if torch.cuda.is_available():
-                if gpu_verbose:
-                    print("gpu is available, using gpu.")
-            else:
-                if gpu_verbose:
-                    print("gpu is not available, resorting to torch cpu.")
-                use_gpu = False
+        if torch.cuda.is_available():
+            backend = ot.backend.TorchBackend()
+            if gpu_verbose:
+                print("GPU is requested and available, using gpu.")
         else:
-            print("We currently only have gpu support for Pytorch, please set backend = ot.backend.TorchBackend(). Reverting to selected backend cpu.")
             use_gpu = False
+            backend = ot.backend.NumpyBackend()
+            if gpu_verbose:
+                print("GPU is requested but not available, resorting to torch cpu.")
     else:
+        backend = ot.backend.NumpyBackend()
         if gpu_verbose:
             print("Using selected backend cpu. If you want to use gpu, set use_gpu = True.")
-
-    if not torch.cuda.is_available():
-        use_gpu = False
-        print("CUDA is not available on your system. Reverting to CPU.")
     
     # check if slices are valid
     for s in [sliceA, sliceB]:
