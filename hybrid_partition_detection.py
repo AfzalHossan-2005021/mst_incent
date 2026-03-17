@@ -91,14 +91,16 @@ def refine_with_hdbscan(coords, coarse_labels, config):
 
         n_cells = len(sub_coords)
 
-        if n_cells < 20:
-
-            final_labels[mask] = label_counter
-            label_counter += 1
+        if n_cells < 50:
+            # For small scattered fragments, just label as noise (-1) to not over-count
+            final_labels[mask] = -1
             continue
 
-        min_cluster_size = max(10, int(n_cells * config.min_mass_fraction))
-        min_samples = max(5, int(n_cells * config.min_samples_fraction))
+        # Use global config size instead of scaling down for sub-portions, 
+        # to avoid detecting micro-clusters within already split portions.
+        global_n_cells = len(coords)
+        min_cluster_size = max(30, int(global_n_cells * config.min_mass_fraction))
+        min_samples = max(10, int(global_n_cells * config.min_samples_fraction))
 
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=min_cluster_size,
@@ -111,6 +113,12 @@ def refine_with_hdbscan(coords, coarse_labels, config):
         unique = np.unique(sub_labels)
 
         for u in unique:
+            if u == -1:
+                # noise stays noise
+                submask = sub_labels == u
+                indices = np.where(mask)[0][submask]
+                final_labels[indices] = -1
+                continue
 
             submask = sub_labels == u
 
@@ -128,8 +136,13 @@ def detect_hybrid_portions(coords, config):
     coarse_labels = coarse_emst_split(coords, config)
 
     final_labels = refine_with_hdbscan(coords, coarse_labels, config)
-
-    unique, final_labels = np.unique(final_labels, return_inverse=True)
+    
+    # only count non-noise labels
+    valid_mask = final_labels != -1
+    if valid_mask.any():
+        unique, final_labels[valid_mask] = np.unique(final_labels[valid_mask], return_inverse=True)
+    else:
+        final_labels[:] = 0
 
     return final_labels
 
