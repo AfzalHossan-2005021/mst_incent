@@ -306,100 +306,34 @@ def find_spatial_portions(
     create exact graph disconnections.
 
     THEOREM: If gap_size > k_knn × σ (where σ = median inter-cell spacing),
-    then the k-NN graph has k_knn × σ ≥ gap_size between portions,
-    meaning no path exists through the gap.
+    then the k-NN gra    import numpy as np
+    try:
+        from master_spatial_portion_detection import find_spatial_portions_master
+        class DummyConfig: pass
+        dummy = DummyConfig()
+        dummy.min_mass_fraction = config.min_mass_fraction
+        dummy.min_cluster_size = 200
+        k, labels = find_spatial_portions_master(adata, dummy, max_portions)
+        if k > 1:
+            print(f"  [BANKSYT-MASTER] detected k={k} macro-portions.")
+            return k, labels
+    except Exception as e:
+        print(f"Master pipeline issue: {e}")
+    
+    try:
+        from hdbscan_spatial_portion_detection import find_spatial_portions_hdbscan
+        class DummyConfig: pass
+        dummy = DummyConfig()
+        dummy.min_mass_fraction = config.min_mass_fraction
+        dummy.min_cluster_size = 200
+        k, labels = find_spatial_portions_hdbscan(adata, dummy, max_portions)
+        print(f"  [BANKSYT-HDBSCAN] detected k={k} macro-portions.")
+        return k, labels
+    except Exception as e:
+        print(f"HDBSCAN pipeline issue: {e}")
 
-    k_knn = ceil(√n) ensures the intra-tissue graph is connected with
-    probability → 1 under the Poisson cell distribution model
-    (since P(any isolated cell) ≤ n × exp(-√n) → 0 as n → ∞).
-
-    Args:
-        adata:        AnnData with .obsm['spatial']
-        config:       BANKSYTConfig
-        max_portions: biological upper bound (caps k after detection)
-
-    Returns:
-        k:      number of detected macro-portions (≥ 1)
-        labels: (n_cells,) integer portion labels 0..k-1
-    """
-    coords = np.asarray(adata.obsm["spatial"], dtype=np.float64)
-    n = len(coords)
-
-    if n < 3:
-        raise ValueError(f"Slice has only {n} cells.")
-
-    # k_knn = ceil(√n): principled from Poisson connectivity analysis
-    k_knn = min(int(np.ceil(np.sqrt(n))), n - 1, 30)
-
-    tree = BallTree(coords, leaf_size=40)
-    _, nb_idx = tree.query(coords, k=k_knn + 1)  # +1 includes self
-
-    # Build k-NN graph
-    rows = np.repeat(np.arange(n), k_knn)
-    cols = nb_idx[:, 1:].ravel()
-    W = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
-    W = W.maximum(W.T)
-
-    # Find connected components
-    n_comp, comp_labels = connected_components(W, directed=False)
-
-    # Classify as major (≥ min_mass_fraction) or minor (debris)
-    _, comp_counts = np.unique(comp_labels, return_counts=True)
-    major_ids = [
-        c for c, cnt in enumerate(comp_counts)
-        if cnt / n >= config.min_mass_fraction
-    ]
-    major_ids = major_ids[:max_portions]  # cap at biological upper bound
-
-    if len(major_ids) < 2:
-        # Single major component → single portion
-        print(f"  [BANKSYT] k=1  (all cells in one connected component)")
-        return 1, np.zeros(n, dtype=int)
-
-    # Assign major components to portions 0..k-1
-    final_labels = np.full(n, -1, dtype=int)
-    for new_i, old_c in enumerate(major_ids):
-        final_labels[comp_labels == old_c] = new_i
-
-    # Assign minor components (debris) to nearest major component
-    debris_mask = final_labels == -1
-    if debris_mask.any():
-        valid_coords = coords[~debris_mask]
-        valid_labels = final_labels[~debris_mask]
-        tree_v = BallTree(valid_coords, leaf_size=40)
-        _, nidx = tree_v.query(coords[debris_mask], k=1)
-        final_labels[debris_mask] = valid_labels[nidx[:, 0]]
-
-    # Re-index to contiguous 0..k-1
-    for new_i, old_l in enumerate(np.unique(final_labels)):
-        final_labels[final_labels == old_l] = new_i
-
-    k = len(np.unique(final_labels))
-    sizes = np.unique(final_labels, return_counts=True)[1].tolist()
-    print(f"  [BANKSYT] k={k}  sizes={sizes}  (spatial k-NN components, k_knn={k_knn})")
-    return k, final_labels
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# STAGE 2: TERRITORY SIGNATURE AND COMPATIBILITY
-# ═════════════════════════════════════════════════════════════════════════════
-
-def compute_territory_signatures(
-    labels: np.ndarray,
-    banksy: np.ndarray,
-    k_portions: int,
-) -> np.ndarray:
-    """
-    Compute the territory signature for each portion.
-
-    T_i = mean_{j ∈ Ω_i} z_j  ∈ ℝ^{2G}
-
-    The territory signature is the mean BANKSY representation of all cells
-    in the territory. It captures:
-      - Average cell type composition of the territory
-      - Average local ecology (what neighboring cell types are present)
-
-    This is directly comparable across slices: two territories with identical
+    return 1, np.zeros(len(adata), dtype=int)
+e across slices: two territories with identical
     cell type composition and ecology will have cosine distance = 0.
 
     Args:

@@ -68,46 +68,8 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 from scipy.spatial.distance import pdist, squareform
 from sklearn.neighbors import BallTree
-from typing import Tuple
+from typing import Tuple, Optional
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Density Filtering (Debris Bridge Removal)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _filter_low_density_debris(coords: np.ndarray, drop_fraction: float = 0.02) -> np.ndarray:
-    """
-    Biological Rationale:
-    Floating "debris cells" and ambient artifacts randomly scatter in the gap between 
-    physical tissue slices. Because MST connects all points, these debris cells act 
-    as "stepping stones", artificially breaking a massive, clean anatomical gap into 
-    several smaller edges, which destroys the jump ratio.
-    
-    Before building the MST, we compute the local cellular density using the 
-    distance to the 5th nearest neighbor. True tissue cells sit in dense matrices 
-    (small 5-NN distance). Floating debris sits alone in empty space (large 5-NN distance).
-    By dynamically pruning the bottom X% of the most isolated cells, we completely 
-    vaporize the "debris bridges", allowing the MST to find the true, massive gap.
-    """
-    if len(coords) < 100:
-        return np.ones(len(coords), dtype=bool)
-
-    tree = BallTree(coords, leaf_size=40)
-    # Distance to the 5th nearest neighbor acts as a robust density metric
-    dists, _ = tree.query(coords, k=6) 
-    density_metric = dists[:, -1] # Distance to the 5th neighbor
-    
-    # Identify the distance threshold for the most isolated (X%) cells
-    isolation_threshold = np.percentile(density_metric, 100 * (1.0 - drop_fraction))
-    
-    # Keep cells that are closer to their neighbors than the isolation threshold
-    keep_mask = density_metric <= isolation_threshold
-    
-    # Failsafe: if density pruning somehow removes too much, fallback to original
-    if keep_mask.sum() < len(coords) * 0.5:
-        return np.ones(len(coords), dtype=bool)
-        
-    return keep_mask
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MST construction
@@ -143,69 +105,51 @@ def _build_mst(coords: np.ndarray, knn_build: int = 15) -> sp.csr_matrix:
 # K detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _detect_stable_k(
-    mst: sp.csr_matrix, 
-    coords: np.ndarray,
-    min_mass_fraction: float,
-    max_portions: int
-) -> Tuple[int, np.ndarray, float, np.ndarray]:
+def _detect_k_from_mst(
+    edge_weights: np.ndarray,
+    max_portions: int = 6,
+    ratio_threshold: float = 0.5,
+) -> int:
     """
-    Biological Grounding: Topographically Sweeping the Edge Manifold.
-    Instead of relying purely on 1D edge jump ratios (which fail when biological 
-    gaps and tears are structurally similar in length), we iteratively prune the 
-    graph edges and observe the resulting 2D physical mass bodies.
-    
-    If cutting an edge produces a 99% tissue body and a 1% peninsula (a tear), 
-    the peninsula is instantly merged back. If cutting an edge produces two 50% 
-    massive bodies (a true structural split), we register it as an anatomical gap.
-    We return the maximum structural 'k' that emerges from sweeping all massive gaps.
+    Detect number of tissue portions using the Maximum Ratio Gap criterion.
+
+    Sorts MST edges descending. Computes ratio[m] = e_m / e_{m+1}.
+    argmax(ratio) identifies the last gap edge.
+
+    Returns k (int). Returns 1 if no ratio >= ratio_threshold.
     """
-    mst_coo = mst.tocoo()
-    edge_weights = mst_coo.data.copy()
-    n_cells = len(coords)
-    
-    # Sort edges strictly descending
     sorted_desc = np.sort(edge_weights)[::-1]
-    
-    # We evaluate all physical connections strictly larger than the dense tissue standard
-    # Lower bound to 90th percentile (top 10%) to allow pushing past heavily scattered debris
-    intra_tissue_bound = np.percentile(edge_weights, 90)
-    n_check = np.sum(sorted_desc > intra_tissue_bound)
-    
-    # Ensure minimum checks to allow enough graph fractures to separate max_portions
-    # Guarantee sweeping up to 500 edges to bypass intense debris halos, because 
-    # breaking 1 edge on a debris floater just creates a 1-cell component that gets re-merged.
-    n_check = max(500, n_check)
-    n_check = min(n_check, len(sorted_desc) - 1)
-    
-    best_k = 1
-    best_labels = np.zeros(n_cells, dtype=int)
-    best_threshold = 0.0
-    
-    # Sweep from the largest edge downwards
-    for m in range(1, n_check + 1):
-        threshold = sorted_desc[m]
-        
-        # Snip all edges larger than the current test threshold
-        mask = mst_coo.data <= threshold
-        pruned = sp.csr_matrix(
-            (mst_coo.data[mask], (mst_coo.row[mask], mst_coo.col[mask])),
-            shape=(n_cells, n_cells),
-        )
-        pruned = pruned + pruned.T
-        _, labels = connected_components(pruned, directed=False)
-        
-        # The biological check: Only bodies surpassing the mass limit are "portions"
-        labels_merged = _merge_small_fragments(labels, coords, min_mass_fraction)
-        unique_structural_portions = len(np.unique(labels_merged))
-        
-        # Maximize the stable structurally viable k
-        if unique_structural_portions > best_k and unique_structural_portions <= max_portions:
-            best_k = unique_structural_portions
-            best_labels = labels_merged.copy()
-            best_threshold = float(threshold)
-            
-    return best_k, best_labels, best_threshold, sorted_desc[:10]
+    n_check = min(max_portions - 1, len(sorted_desc) - 1)
+    if n_check < 1:
+        return 1
+
+    ratios = sorted_desc[:n_check] / (sorted_desc[1:n_check + 1] + 1e-12)
+    best_m = int(np.argmax(ratios))
+
+    if float(ratios[best_m]) < ratio_threshold:
+        return 1
+
+    # k = (number of gap edges) + 1 = (best_m + 1) + 1
+    return best_m + 2
+
+
+def _build_components(mst: sp.csr_matrix, k: int, n: int) -> np.ndarray:
+    """
+    Remove the k-1 largest MST edges and return connected component labels.
+    """
+    if k <= 1:
+        return np.zeros(n, dtype=int)
+    mst_coo = mst.tocoo()
+    sorted_desc = np.sort(mst_coo.data)[::-1]
+    threshold = float(sorted_desc[k - 1])
+    mask = mst_coo.data <= threshold
+    pruned = sp.csr_matrix(
+        (mst_coo.data[mask], (mst_coo.row[mask], mst_coo.col[mask])),
+        shape=(n, n),
+    )
+    pruned = pruned + pruned.T
+    _, labels = connected_components(pruned, directed=False)
+    return labels.astype(int)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,33 +194,20 @@ def _validate_portions(labels: np.ndarray, min_mass_fraction: float) -> bool:
 
 def _compute_stability_score(
     edge_weights: np.ndarray,
-    coords: np.ndarray,
-    mst: sp.csr_matrix,
     k_ref: int,
-    min_mass_fraction: float,
+    max_portions: int = 6,
     ratio_range: Tuple[float, float] = (1.5, 6.0),
     n_steps: int = 25,
 ) -> float:
     """
     Fraction of ratio_threshold values in ratio_range that produce the same
-    number of macroscopic portions as the reference. Values above 0.7 
-    indicate robust detection.
+    k as the reference. Values above 0.7 indicate robust detection.
     """
     thresholds = np.linspace(ratio_range[0], ratio_range[1], n_steps)
-    agree = 0
-    n = len(coords)
-    
-    for t in thresholds:
-        # Detect initial k (including debris)
-        k_init = _detect_k_from_mst(edge_weights, ratio_threshold=t)
-        # Build components and merge down to macroscopic structures
-        labels_init = _build_components(mst, k_init, n)
-        labels_merged = _merge_small_fragments(labels_init, coords, min_mass_fraction)
-        k_macro = len(np.unique(labels_merged))
-        
-        if k_macro == k_ref:
-            agree += 1
-            
+    agree = sum(
+        1 for t in thresholds
+        if _detect_k_from_mst(edge_weights, max_portions, t) == k_ref
+    )
     return agree / n_steps
 
 
@@ -313,7 +244,7 @@ def find_spatial_portions_mst(
     adata: anndata.AnnData,
     min_mass_fraction: float = 0.05,
     max_portions: int = 6,
-    ratio_threshold: float = 1.8,
+    ratio_threshold: float = 3.0,
     merge_fragments: bool = True,
     knn_build: int = 15,
 ) -> PortionDetectionResult:
@@ -328,7 +259,7 @@ def find_spatial_portions_mst(
                         Default 0.05 (5%).
     max_portions      : Biological upper bound on k. Default 6.
     ratio_threshold   : Minimum edge-weight ratio to declare a gap.
-                        tau=1.8: gap must be >= 1.8x the next intra-tissue edge.
+                        tau=3.0: gap must be >= 3x the next intra-tissue edge.
                         Increase for near-touching tissue; decrease for sparse.
     merge_fragments   : If True, merge sub-threshold fragments (recommended).
     knn_build         : k for BallTree approximation when n > 5000 cells.
@@ -347,13 +278,7 @@ def find_spatial_portions_mst(
     if n < 3:
         raise ValueError(f"Slice has only {n} cells.")
 
-    # 1. Biological pre-filtering: vaporize "stepping stone" debris using structural density
-    keep_mask = _filter_low_density_debris(coords, drop_fraction=0.02)
-    filtered_coords = coords[keep_mask]
-    n_filtered = len(filtered_coords)
-
-    # 2. Build MST on the dense structural manifold
-    mst = _build_mst(filtered_coords, knn_build=knn_build)
+    mst = _build_mst(coords, knn_build=knn_build)
     mst_coo = mst.tocoo()
     edge_weights = mst_coo.data.copy()
 
@@ -364,65 +289,67 @@ def find_spatial_portions_mst(
             stability_score=1.0, ratio_threshold_used=ratio_threshold,
         )
 
-    # 3. Topographic sweeping to evaluate 2D chunk mass
-    k, filtered_labels, threshold, top_10 = _detect_stable_k(
-        mst, filtered_coords, min_mass_fraction, max_portions
-    )
+    sorted_desc = np.sort(edge_weights)[::-1]
+    n_top = min(max_portions, len(sorted_desc) - 1)
+    top_weights = sorted_desc[:n_top + 1]
+    top_ratios = top_weights[:-1] / (top_weights[1:] + 1e-12)
 
-    # 4. Map the labels back to the original full coordinate set 
-    # (assigning the trimmed 2% debris back to their nearest massive structural cluster)
-    labels = np.zeros(n, dtype=int) - 1
-    if k == 1:
-        labels = np.zeros(n, dtype=int)
-    else:
-        labels[keep_mask] = filtered_labels
-        
-        # Fast re-attachment of the filtered debris
-        if not keep_mask.all():
-            debris_indices = np.where(~keep_mask)[0]
-            # Re-attach to nearest dense tissue centroid/portion
-            tree_filtered = BallTree(filtered_coords)
-            _, nearest_idx = tree_filtered.query(coords[debris_indices], k=1)
-            labels[debris_indices] = filtered_labels[nearest_idx.ravel()]
+    k = _detect_k_from_mst(edge_weights, max_portions, ratio_threshold)
+    labels = _build_components(mst, k, n)
 
-    if not _validate_portions(labels, min_mass_fraction):
+    if merge_fragments:
+        labels = _merge_small_fragments(labels, coords, min_mass_fraction)
+    elif not _validate_portions(labels, min_mass_fraction):
         raise ValueError(
             "Detected portions include fragments below min_mass_fraction. "
+            "Set merge_fragments=True or increase ratio_threshold."
+        )
+
+    k = len(np.unique(labels))
+    stability = _compute_stability_score(edge_weights, k, max_portions)
+    gap_threshold = float(sorted_desc[k - 1]) if k >= 2 else float('inf')
+
+    if stability < 0.4:
+        warnings.warn(
+            f"Low stability score ({stability:.2f}) for k={k}. "
+            "Consider adjusting ratio_threshold or inspecting the slide.",
+            UserWarning,
         )
 
     return PortionDetectionResult(
-        k=k, labels=labels, gap_threshold=threshold,
-        top_edge_weights=top_10, top_ratios=np.array([]),
-        stability_score=1.0,  # Max stable K sweep guarantees structural stability
-        ratio_threshold_used=1.0,
+        k=k, labels=labels, gap_threshold=gap_threshold,
+        top_edge_weights=top_weights, top_ratios=top_ratios,
+        stability_score=stability,
+        ratio_threshold_used=ratio_threshold,
     )
 
 
 def find_spatial_portions(
     adata: anndata.AnnData,
-    config=None,
+    config,
     max_portions: int = 4,
 ) -> Tuple[int, np.ndarray]:
     """
     Drop-in replacement for the GMM-based find_spatial_portions in smart_align.py.
-    """
-    if config is None:
-        min_mass_fraction = 0.05
-    else:
-        min_mass_fraction = getattr(config, 'min_mass_fraction', 0.05)
 
+    The AlignmentConfig.silhouette_threshold parameter has no equivalent here
+    and is intentionally ignored -- geometric separation is now measured
+    directly via the ratio criterion, not as a post-hoc silhouette proxy.
+
+    Parameters
+    ----------
+    adata        : AnnData with .obsm['spatial'].
+    config       : AlignmentConfig. Uses .min_mass_fraction.
+    max_portions : Upper bound on k.
+
+    Returns
+    -------
+    (k, labels) -- same as the original GMM-based function.
+    """
     result = find_spatial_portions_mst(
         adata,
-        min_mass_fraction=float(min_mass_fraction),
-        max_portions=int(max_portions),
+        min_mass_fraction=config.min_mass_fraction,
+        max_portions=max_portions,
         merge_fragments=True,
     )
-    
-    # --- DEBUGGING INJECTION ---
-    print(f"\n[MST DEBUG] Evaluating Slice:")
-    print(f"Top 10 edges (descending): {np.round(result.top_edge_weights[:10], 2)}")
-    print(f"Top 10 jump ratios: {np.round(result.top_ratios[:10], 2)}")
-    print(f"Detected portions: k={result.k} (Threshold required={result.ratio_threshold_used})")
-    # ---------------------------
-
     return result.k, result.labels
