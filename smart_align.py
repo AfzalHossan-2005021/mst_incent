@@ -6,7 +6,7 @@ from anndata import AnnData
 import matplotlib.pyplot as plt
 from .INCENT import pairwise_align
 
-from .spatial_portion_detection import find_spatial_portions_mst as find_spatial_portions
+from .hdbscan_spatial_portion_detection import find_spatial_portions_hdbscan as find_spatial_portions
 
 class AlignmentConfig:
     """
