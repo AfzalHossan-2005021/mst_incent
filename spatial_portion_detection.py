@@ -324,6 +324,120 @@ def find_spatial_portions_mst(
     )
 
 
+def find_spatial_portions_bilateral(
+    adata: anndata.AnnData,
+    axis: str = 'x',
+    percentile_gap: float = 0.15,
+    min_portion_size: int = 10,
+) -> Tuple[int, np.ndarray]:
+    """
+    **Aggressive bilateral detection for paired tissue (left/right, etc).**
+    
+    For truly bilateral data, look for a prominent spatial gap along one axis
+    (typically X for left/right) and split there.
+    
+    Parameters
+    ----------
+    adata              : AnnData with .obsm['spatial']
+    axis               : 'x' or 'y' - which axis to search for gap
+    percentile_gap     : Percentile of coordinate range to search for peak gap
+                         (0.15 = scan innermost 15% of range for largest gap)
+    min_portion_size   : Minimum cells per portion; smaller = merged
+    
+    Returns
+    -------
+    (k, labels) where k=2 if bilateral structure found, else k=1
+    """
+    coords = np.asarray(adata.obsm['spatial'], dtype=np.float64)
+    n = len(coords)
+    
+    # Select axis
+    axis_idx = 0 if axis.lower() == 'x' else 1
+    coord_1d = coords[:, axis_idx]
+    
+    # Sort by coordinate
+    order = np.argsort(coord_1d)
+    sorted_coord = coord_1d[order]
+    
+    # Look for largest gap in inner region (50% ± percentile_gap)
+    c_min, c_max = sorted_coord.min(), sorted_coord.max()
+    c_range = c_max - c_min
+    search_start = c_min + c_range * (0.5 - percentile_gap)
+    search_end = c_max + c_range * (0.5 + percentile_gap)
+    
+    search_mask = (sorted_coord >= search_start) & (sorted_coord <= search_end)
+    search_indices = np.where(search_mask)[0]
+    
+    if len(search_indices) < 10:
+        # Fallback to scanning entire range
+        search_indices = np.arange(1, len(sorted_coord))
+    
+    # Find largest gap in scanned region
+    max_gap = 0
+    split_point = -1
+    for i in search_indices[:-1]:
+        gap = sorted_coord[i + 1] - sorted_coord[i]
+        if gap > max_gap:
+            max_gap = gap
+            split_point = i
+    
+    if split_point < 0 or max_gap < (c_range * 0.05):  # Gap < 5% of range
+        return 1, np.zeros(n, dtype=int)
+    
+    # Split at the gap
+    labels = np.ones(n, dtype=int)
+    left_indices = order[:split_point + 1]
+    labels[left_indices] = 0
+    
+    # Enforce minimum portion size
+    unique, counts = np.unique(labels, return_counts=True)
+    for label_val, count in zip(unique, counts):
+        if count < min_portion_size:
+            # Merge small portion into the larger one
+            other_label = 1 - label_val
+            labels[labels == label_val] = other_label
+    
+    k = len(np.unique(labels))
+    return k, labels
+
+
+def diagnose_mst(adata: anndata.AnnData, max_portions: int = 4, verbose: bool = True) -> dict:
+    """
+    Diagnostic function to inspect MST edge weights and ratios.
+    Helps identify if portions exist but aren't being detected.
+    
+    Returns dictionary with:
+      - edge_weights: sorted MST edge weights (descending)
+      - ratios: edge weight ratios across candidates
+      - recommended_k: suggested k value
+      - gap_info: info about largest gaps
+    """
+    coords = np.asarray(adata.obsm['spatial'], dtype=np.float64)
+    mst = _build_mst(coords, knn_build=15)
+    mst_coo = mst.tocoo()
+    edge_weights = np.sort(mst_coo.data.copy())[::-1]
+    
+    n_check = min(max_portions - 1, len(edge_weights) - 1)
+    ratios = edge_weights[:n_check] / (edge_weights[1:n_check + 1] + 1e-12)
+    best_m = int(np.argmax(ratios))
+    
+    diagnostics = {
+        'edge_weights': edge_weights[:10],
+        'ratios': ratios[:10],
+        'max_ratio': float(ratios[best_m]),
+        'max_ratio_index': best_m,
+        'recommended_k': best_m + 2,
+    }
+    
+    if verbose:
+        print(f"Top 10 MST edge weights: {edge_weights[:10]}")
+        print(f"Top 10 ratios: {ratios[:10]}")
+        print(f"Max ratio: {ratios[best_m]:.2f} at index {best_m} (suggests k={best_m + 2})")
+        print(f"Gap between e[0] and e[1]: {edge_weights[0]:.2f} / {edge_weights[1]:.2f} = {ratios[0]:.2f}")
+    
+    return diagnostics
+
+
 def find_spatial_portions(
     adata: anndata.AnnData,
     config,
