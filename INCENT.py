@@ -158,8 +158,14 @@ def pairwise_align(
     # To achieve perfect structural alignment regardless of slices being from different 
     # platforms, resolutions, or mechanical stretch, we normalize the spatial spaces to [0, 1].
     # This ensures Gromov-Wasserstein penalty relies purely on relative shape, not absolute size.
-    D_A /= nx.max(D_A)
-    D_B /= nx.max(D_B)
+    global_max = max(D_A.max(), D_B.max())
+    if global_max > 0:  # Avoid division by zero for degenerate cases
+        D_A = D_A / global_max
+        D_B = D_B / global_max
+    else:
+        logFile.write("Warning: Maximum spatial distance is zero. This may indicate all spots have identical coordinates. Spatial distances will not be scaled.\n")
+        if verbose:
+            print("Warning: Maximum spatial distance is zero. This may indicate all spots have identical coordinates. Spatial distances will not be scaled.\n")
 
     # print the shape of D_A and D_B
     # print("D_A.shape: ", D_A.shape)
